@@ -23,6 +23,8 @@ Floating always-on-top widget for Claude **SESSION (5h)** and **WEEKLY (7d)** us
 
 ### Notes
 
-- Auto-refresh every 1 minute; manual refresh capped at 2/min (API rate limits)
+- Auto-refresh every 2 minutes; manual refresh capped at 2/min. The usage API
+  is rate-limited (~6 req/5 min); on a 429 the app honors the server's
+  `Retry-After` and pauses polling until the cooldown clears
 - Settings: display name + auto-start 5h session when idle (desk-gadget parity)
 - Source: `windows/` in the repo
