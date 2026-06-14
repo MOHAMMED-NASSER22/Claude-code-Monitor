@@ -1,0 +1,16 @@
+# --- secrets / credentials (never commit) ---
+credentials*.json
+.credentials.json
+*.tmp
+
+# --- OS / editor junk ---
+.DS_Store
+
+# --- legacy browser-scrape approach (replaced by the OAuth-token bridge) ---
+bridge.py
+bridge_otlp.py
+CLOUDFLARE_NOTES.md
+.usage_state.json
+
+# --- build artifacts ---
+*.zip
