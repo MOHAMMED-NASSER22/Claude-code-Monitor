@@ -3,6 +3,7 @@
 Floating always-on-top widget that tracks your AI usage across **Claude** and **Cursor** in one cycling card:
 
 - **Claude** — SESSION (5h) and WEEKLY (7d), same numbers as Claude Code `/usage` and the ESP8266 desk gadget
+- **Claude session reset** — optional **Auto-start 5h session when idle**: when your SESSION window has expired, the app sends one minimal Haiku message (~22 tokens) to anchor a fresh 5h block automatically (same behavior as the desk gadget)
 - **Cursor** — Auto + Composer pool and API pool (read from your local Cursor sign-in; no setup). Cursor cards are marked with the spinning Cursor cube.
 
 ### Requirements
@@ -12,11 +13,9 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
 
 ### First run
 
-1. Download and run **`TokenMaxxing.exe`** only 
+1. Download and run **`TokenMaxxing.exe`**
 2. If Windows SmartScreen warns, choose **More info → Run anyway** (app is not code-signed)
 3. Click **Open Browser**, sign in to Claude, paste the authorization code → **Submit**
-
-To pin to the taskbar: **drag `TokenMaxxing.exe` from File Explorer onto the taskbar**. If you previously pinned an older build, unpin it first.
 
 ### Controls
 
@@ -29,13 +28,11 @@ To pin to the taskbar: **drag `TokenMaxxing.exe` from File Explorer onto the tas
 ### Settings (right-click → ⚙)
 
 - **Sources**: toggle Claude / Cursor on or off (show one or both), set a Cursor display name
-- Per Claude account: display name + auto-start 5h session when idle (desk-gadget parity)
+- Per Claude account: display name + **Auto-start 5h session when idle** (on by default) — restarts the SESSION clock when idle so you begin a new 5h window without opening Claude Code
 - Changing settings never calls the rate-limited Claude API; re-enabling Cursor repopulates instantly
 
 ### Notes
 
-- **Use the `.exe` only** — running from Python source is for developers; end users should always use `TokenMaxxing.exe`
-- Custom orange **spark** app icon on the `.exe`, taskbar, and window title (**Token Maxxing**)
 - Auto-refresh every 2 minutes; manual refresh capped at 2/min. The Claude usage API
   is rate-limited (~6 req/5 min); on a 429 the app honors the server's `Retry-After`
   and pauses polling until the cooldown clears
