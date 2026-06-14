@@ -20,7 +20,21 @@ Usage:
   - Right-click for context menu (refresh, settings, re-auth, opacity, exit)
 """
 
-import base64, glob, hashlib, json, os, re, secrets, ssl, sys, threading, time, webbrowser
+import sys
+import os
+
+# Windows taskbar groups windows by AppUserModelID. Must be set before PyQt loads
+# or Windows keeps the pythonw.exe / floppy-disk icon (including pinned shortcuts).
+_APP_USER_MODEL_ID = "sherbo.TokenMaxxing"
+if sys.platform == "win32":
+    try:
+        import ctypes as _ctypes
+        _ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            _APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+import base64, glob, hashlib, json, re, secrets, ssl, threading, time, webbrowser
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
@@ -37,8 +51,12 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QPen, QLinearGradient,
-    QPainterPath, QAction, QFont, QFontMetrics, QIcon,
+    QPainterPath, QAction, QFont, QFontMetrics, QIcon, QGuiApplication,
 )
+
+# Windows taskbar groups windows by AppUserModelID. Without a unique ID set
+# before any UI, pinned shortcuts inherit the Python interpreter icon.
+# (Also set at module import above, before PyQt; repeated here for source runs.)
 
 
 def _resource_path(name: str) -> str:
@@ -47,9 +65,71 @@ def _resource_path(name: str) -> str:
     return os.path.join(base, name)
 
 
-def _app_icon() -> QIcon:
+def _icon_path() -> str:
+    """Path for Win32/Qt icon APIs — prefer bundled multi-size .ico."""
     path = _resource_path("spark.ico")
-    return QIcon(path) if os.path.exists(path) else QIcon()
+    if os.path.exists(path):
+        return path
+    if getattr(sys, "frozen", False):
+        return sys.executable
+    return ""
+
+
+def _app_icon() -> QIcon:
+    path = _icon_path()
+    if path:
+        icon = QIcon(path)
+        if not icon.isNull():
+            return icon
+    return QIcon()
+
+
+def _win_set_hwnd_icons(hwnd: int) -> None:
+    """Force taskbar/title icons via Win32 — Qt alone is unreliable on frameless windows."""
+    path = _icon_path()
+    if not path or not hwnd:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        WM_SETICON = 0x0080
+        ICON_SMALL, ICON_BIG = 0, 1
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
+        LR_DEFAULTSIZE = 0x0040
+
+        LoadImageW = user32.LoadImageW
+        LoadImageW.argtypes = [
+            wintypes.HINSTANCE, wintypes.LPCWSTR, ctypes.c_uint,
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+        ]
+        LoadImageW.restype = wintypes.HANDLE
+
+        flags = LR_LOADFROMFILE | LR_DEFAULTSIZE
+        for idx in (ICON_SMALL, ICON_BIG):
+            hicon = LoadImageW(None, path, IMAGE_ICON, 0, 0, flags)
+            if hicon:
+                user32.SendMessageW(hwnd, WM_SETICON, idx, hicon)
+    except Exception:
+        pass
+
+
+def _win_set_app_user_model_id() -> None:
+    """Must run before QApplication — Windows reads this for taskbar grouping."""
+    if sys.platform != "win32":
+        return
+    try:
+        QGuiApplication.setDesktopFileName(_APP_USER_MODEL_ID)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            _APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 # ── OAuth / API constants (extracted from the Claude Code binary) ────────────
 # All values below were extracted from the shipping Claude Code binary's OAuth
@@ -976,6 +1056,7 @@ class OverlayWindow(QWidget):
         # hidden from the Windows taskbar/Alt-Tab. Using a normal Window gives us
         # a taskbar entry that carries the app icon. WindowTitle drives the label.
         self.setWindowTitle("Token Maxxing")
+        self.setWindowIcon(_app_icon())
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint  |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -987,6 +1068,11 @@ class OverlayWindow(QWidget):
         self.setMinimumSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
         self.show()
         _enable_acrylic(int(self.winId()))
+        if sys.platform == "win32":
+            QTimer.singleShot(0, self._win_apply_native_icon)
+
+    def _win_apply_native_icon(self):
+        _win_set_hwnd_icons(int(self.winId()))
 
     # ── UI layout ─────────────────────────────────────────────────────────────
 
@@ -1647,6 +1733,8 @@ class OverlayWindow(QWidget):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    _win_set_app_user_model_id()
+
     if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)
 
@@ -1654,23 +1742,13 @@ def main():
     app.setQuitOnLastWindowClosed(True)
     app.setApplicationName("Token Maxxing")
 
-    # Give Windows a distinct AppUserModelID so the taskbar groups this app
-    # under our own icon instead of the generic python/pythonw one.
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "TokenMaxxing.Overlay")
-        except Exception:
-            pass
-
-    app.setWindowIcon(_app_icon())
+    icon = _app_icon()
+    app.setWindowIcon(icon)
 
     font = QFont("Segoe UI", 10) if sys.platform == "win32" else QFont("SF Pro Display", 10)
     app.setFont(font)
 
     w = OverlayWindow()
-    w.setWindowIcon(_app_icon())
     w.setWindowOpacity(0.92)
 
     sys.exit(app.exec())

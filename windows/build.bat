@@ -7,7 +7,7 @@ pip install --quiet PyQt6 pyinstaller
 
 echo.
 echo Generating app icon (spark.ico) ...
-python make_icon.py
+py make_icon.py
 
 echo.
 echo Building TokenMaxxing.exe ...
@@ -16,6 +16,8 @@ pyinstaller ^
     --windowed ^
     --name TokenMaxxing ^
     --icon spark.ico ^
+    --version-file version_info.txt ^
+    --runtime-hook pyi_rth_appusermodelid.py ^
     --add-data "spark.ico;." ^
     --clean ^
     claude_monitor_overlay.py

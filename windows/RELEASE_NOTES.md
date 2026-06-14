@@ -12,9 +12,11 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
 
 ### First run
 
-1. Launch `TokenMaxxing.exe`
+1. Download and run **`TokenMaxxing.exe`** only — do not launch via `python claude_monitor_overlay.py` (that shows the wrong taskbar icon)
 2. If Windows SmartScreen warns, choose **More info → Run anyway** (app is not code-signed)
 3. Click **Open Browser**, sign in to Claude, paste the authorization code → **Submit**
+
+To pin to the taskbar: **drag `TokenMaxxing.exe` from File Explorer onto the taskbar**. If you previously pinned an older build, unpin it first.
 
 ### Controls
 
@@ -32,6 +34,7 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
 
 ### Notes
 
+- **Use the `.exe` only** — running from Python source is for developers; end users should always use `TokenMaxxing.exe`
 - Custom orange **spark** app icon on the `.exe`, taskbar, and window title (**Token Maxxing**)
 - Auto-refresh every 2 minutes; manual refresh capped at 2/min. The Claude usage API
   is rate-limited (~6 req/5 min); on a 429 the app honors the server's `Retry-After`
