@@ -51,7 +51,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Config (override via environment variables)
 # ---------------------------------------------------------------------------
 PORT         = int(os.environ.get("PORT", "8088"))
-POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))         # how often to re-read usage
+POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "120"))        # how often to re-read usage
+                                                                 # (2 min; ~6 req/300s budget,
+                                                                 #  60s sat on the 429 edge)
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
 # Force an exact set of credential files (os.pathsep-separated). If unset, every
 # CRED_DIR/credentials*.json is used -- so ./mint_token.sh <name> just works.
@@ -127,6 +129,12 @@ def _lock_for(path):
 # ---------------------------------------------------------------------------
 _SSL_CTX = ssl.create_default_context()
 
+# Set from a 429's Retry-After header; the poller backs off until then.
+_rate_limit_until = 0.0          # time.monotonic() value
+
+def _rate_limited_remaining():
+    return max(0.0, _rate_limit_until - time.monotonic())
+
 def _http_json(method, url, headers=None, body=None, form=None, timeout=25):
     """Return (status_code, parsed_json_or_text). Never raises on HTTP errors.
     body -> JSON-encoded; form -> application/x-www-form-urlencoded."""
@@ -150,6 +158,14 @@ def _http_json(method, url, headers=None, body=None, form=None, timeout=25):
             except ValueError:
                 return r.status, raw
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            global _rate_limit_until
+            try:
+                ra = float(e.headers.get("Retry-After", "") or 0)
+            except (TypeError, ValueError):
+                ra = 0.0
+            # Server sends Retry-After: ~299s. Fall back to 300s if absent.
+            _rate_limit_until = time.monotonic() + (ra if ra > 0 else 300.0)
         raw = e.read().decode("utf-8", "replace") if e.fp else ""
         try:
             return e.code, json.loads(raw)
@@ -357,7 +373,11 @@ def poll_loop():
         else:
             print("[bridge] no credentials yet -- run ./mint_token.sh", file=sys.stderr)
         first = False
-        _shutdown.wait(POLL_SECONDS)
+        # If a 429 set a cooldown, wait it out instead of the normal interval.
+        cooldown = _rate_limited_remaining()
+        if cooldown > 0:
+            print(f"[bridge] rate limited -- backing off {int(cooldown)}s", flush=True)
+        _shutdown.wait(max(POLL_SECONDS, cooldown))
 
 # ---------------------------------------------------------------------------
 # HTTP server

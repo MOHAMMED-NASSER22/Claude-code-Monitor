@@ -57,9 +57,18 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-POLL_MS      = 60 * 1000        # 1 min (API is rate-limited — avoid extra manual refreshes)
+POLL_MS      = 120 * 1000       # 2 min. Budget is ~6 req/300s window (server enforces a
+                                # 300s cooldown via Retry-After on 429); 60s sat on the
+                                # edge and tripped 429 once manual refreshes piled on.
 MANUAL_REFRESH_MAX    = 2       # max manual refreshes per rolling window
 MANUAL_REFRESH_WINDOW = 60.0    # seconds
+
+# Set from a 429's Retry-After header; usage polls/refreshes pause until then.
+_rate_limit_until = 0.0         # time.monotonic() value
+
+
+def _rate_limited_remaining() -> float:
+    return max(0.0, _rate_limit_until - time.monotonic())
 
 # ── Palette — mirrors simulator.html PAL / palette.json ─────────────────────
 C_PANEL   = QColor(  0,   0,   0)        # BG   (#000000) dashboard fill
@@ -258,6 +267,14 @@ def _http_json(method: str, url: str, headers: dict | None = None,
             except ValueError:
                 return r.status, raw
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            global _rate_limit_until
+            try:
+                ra = float(e.headers.get("Retry-After", "") or 0)
+            except (TypeError, ValueError):
+                ra = 0.0
+            # Server sends Retry-After: ~299s. Fall back to 300s if absent.
+            _rate_limit_until = time.monotonic() + (ra if ra > 0 else 300.0)
         raw = e.read().decode("utf-8", "replace") if e.fp else ""
         try:
             return e.code, json.loads(raw)
@@ -377,7 +394,8 @@ def fetch_all_accounts() -> list[dict]:
                 headers["Authorization"] = f"Bearer {token}"
                 status, resp = _http_json("GET", USAGE_URL, headers=headers)
             if status == 429:
-                raise RuntimeError("Rate limited (429) — wait ~15 min")
+                wait = int(round(_rate_limited_remaining())) or 300
+                raise RuntimeError(f"Rate limited — retry in {wait}s")
             if status != 200 or not isinstance(resp, dict):
                 raise RuntimeError(f"Usage API returned HTTP {status}")
             fh = resp.get("five_hour") or {}
@@ -1164,6 +1182,13 @@ class OverlayWindow(QWidget):
 
     def _trigger_fetch(self):
         if self._fetching:
+            return
+        remaining = _rate_limited_remaining()
+        if remaining > 0:
+            # Honor the server's Retry-After: don't hammer during cooldown.
+            self._refresh_notice = f"Rate limited {int(remaining)}s"
+            self._refresh_notice_until = time.monotonic() + min(3.0, remaining)
+            self._refresh_display()
             return
         self._fetching = True
         if self._stack.currentIndex() == 0:
