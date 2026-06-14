@@ -6,11 +6,17 @@ REM Requirements: pip install PyQt6 pyinstaller
 pip install --quiet PyQt6 pyinstaller
 
 echo.
+echo Generating app icon (spark.ico) ...
+python make_icon.py
+
+echo.
 echo Building TokenMaxxing.exe ...
 pyinstaller ^
     --onefile ^
     --windowed ^
     --name TokenMaxxing ^
+    --icon spark.ico ^
+    --add-data "spark.ico;." ^
     --clean ^
     claude_monitor_overlay.py
 

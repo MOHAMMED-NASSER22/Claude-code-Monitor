@@ -37,8 +37,19 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QPen, QLinearGradient,
-    QPainterPath, QAction, QFont, QFontMetrics,
+    QPainterPath, QAction, QFont, QFontMetrics, QIcon,
 )
+
+
+def _resource_path(name: str) -> str:
+    """Path to a bundled resource, working both from source and a PyInstaller exe."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+def _app_icon() -> QIcon:
+    path = _resource_path("spark.ico")
+    return QIcon(path) if os.path.exists(path) else QIcon()
 
 # ── OAuth / API constants (extracted from the Claude Code binary) ────────────
 # All values below were extracted from the shipping Claude Code binary's OAuth
@@ -960,10 +971,15 @@ class OverlayWindow(QWidget):
             self._show_auth()
 
     def _init_window(self):
+        # FramelessWindowHint + StaysOnTop keeps the floating overlay look.
+        # We intentionally do NOT use Qt.WindowType.Tool here: a Tool window is
+        # hidden from the Windows taskbar/Alt-Tab. Using a normal Window gives us
+        # a taskbar entry that carries the app icon. WindowTitle drives the label.
+        self.setWindowTitle("Token Maxxing")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint  |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
+            Qt.WindowType.Window
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         pad = PANEL_PAD
@@ -1638,10 +1654,23 @@ def main():
     app.setQuitOnLastWindowClosed(True)
     app.setApplicationName("Token Maxxing")
 
+    # Give Windows a distinct AppUserModelID so the taskbar groups this app
+    # under our own icon instead of the generic python/pythonw one.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "TokenMaxxing.Overlay")
+        except Exception:
+            pass
+
+    app.setWindowIcon(_app_icon())
+
     font = QFont("Segoe UI", 10) if sys.platform == "win32" else QFont("SF Pro Display", 10)
     app.setFont(font)
 
     w = OverlayWindow()
+    w.setWindowIcon(_app_icon())
     w.setWindowOpacity(0.92)
 
     sys.exit(app.exec())

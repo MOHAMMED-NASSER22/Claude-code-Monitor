@@ -5,7 +5,7 @@ a = Analysis(
     ['claude_monitor_overlay.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('spark.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['spark.ico'],
 )

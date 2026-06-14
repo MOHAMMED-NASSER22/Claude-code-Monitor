@@ -32,6 +32,7 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
 
 ### Notes
 
+- Custom orange **spark** app icon on the `.exe`, taskbar, and window title (**Token Maxxing**)
 - Auto-refresh every 2 minutes; manual refresh capped at 2/min. The Claude usage API
   is rate-limited (~6 req/5 min); on a 429 the app honors the server's `Retry-After`
   and pauses polling until the cooldown clears
