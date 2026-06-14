@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Claude Usage Monitor — Desktop Overlay
-Floating glassy widget showing Claude session (5h) and weekly (7d) usage.
+Token Maxxing — Desktop Overlay
+Floating glassy widget showing Claude session (5h) / weekly (7d) usage and
+Cursor Auto + API pool usage.
 
 Reads credentials from ~/.claude_usage_bridge/credentials*.json.
 No external tools needed — includes a built-in OAuth login page so you can
@@ -9,7 +10,7 @@ sign in (or re-auth) directly from the overlay.
 
 Requirements:  pip install PyQt6
 Build to .exe: cd windows && build.bat
-               (or: pyinstaller --onefile --windowed --name ClaudeMonitor claude_monitor_overlay.py)
+               (or: pyinstaller --onefile --windowed --name TokenMaxxing claude_monitor_overlay.py)
 
 Usage:
   - Drag anywhere on the widget to move it
@@ -22,6 +23,8 @@ Usage:
 import base64, glob, hashlib, json, os, re, secrets, ssl, sys, threading, time, webbrowser
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime
+
+import cursor_usage   # optional extra source: Cursor Auto + API pools
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
@@ -80,6 +83,7 @@ C_DIM     = QColor(128, 128, 128)        # DIM
 C_TRACK   = QColor( 32,  32,  32)        # TRACK  (#202020)
 C_ACCENT  = QColor(  0, 168, 248)        # ACCENT (#00A8F8)
 C_CLAUDE  = QColor(216, 116,  80)        # CLAUDE (#D87450)
+C_CURSOR  = QColor(230, 230, 236)        # CURSOR brand accent (mono / near-white)
 C_GREEN   = QColor( 40, 188,  80)        # GREEN  (#28BC50)
 C_YELLOW  = QColor(248, 204,   0)        # YELLOW (#F8CC00)
 C_RED     = QColor(248,  52,  48)        # RED    (#F83430)
@@ -87,6 +91,8 @@ C_RED     = QColor(248,  52,  48)        # RED    (#F83430)
 SCALE     = 2                              # 160×128 TFT coords → desktop pixels
 PANEL_W   = 160 * SCALE
 PANEL_H   = 128 * SCALE
+PANEL_PAD = 8                              # glassy margin around the dashboard
+                                           # (small → content fills to the edges)
 
 
 def _pct_color(pct: int) -> QColor:
@@ -215,6 +221,49 @@ def _save_account_settings(path: str, *, name: str | None = None,
         if session_started is not None:
             doc["sessionStarted"] = bool(session_started)
     _update_cred_doc(path, edit)
+
+
+# ── App-level config (source toggles + Cursor name) ─────────────────────────
+# Stored separately from credential files since Cursor has no file we own.
+APP_CONFIG_PATH = os.path.join(CRED_DIR, "overlay_config.json")
+_APP_CONFIG_DEFAULTS = {"show_claude": True, "show_cursor": True, "cursor_name": ""}
+
+
+def load_app_config() -> dict:
+    cfg = dict(_APP_CONFIG_DEFAULTS)
+    try:
+        with open(APP_CONFIG_PATH) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k in _APP_CONFIG_DEFAULTS:
+                if k in data:
+                    cfg[k] = data[k]
+    except Exception:
+        pass
+    cfg["show_claude"] = bool(cfg["show_claude"])
+    cfg["show_cursor"] = bool(cfg["show_cursor"])
+    cfg["cursor_name"] = (str(cfg.get("cursor_name") or "")).strip()[:40]
+    return cfg
+
+
+def save_app_config(*, show_claude: bool | None = None,
+                    show_cursor: bool | None = None,
+                    cursor_name: str | None = None) -> None:
+    cfg = load_app_config()
+    if show_claude is not None:
+        cfg["show_claude"] = bool(show_claude)
+    if show_cursor is not None:
+        cfg["show_cursor"] = bool(show_cursor)
+    if cursor_name is not None:
+        cfg["cursor_name"] = cursor_name.strip()[:40]
+    try:
+        os.makedirs(CRED_DIR, exist_ok=True)
+        tmp = APP_CONFIG_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, APP_CONFIG_PATH)
+    except Exception:
+        pass
 
 
 def _account_label(path: str, idx: int) -> str:
@@ -376,12 +425,27 @@ def _to_minutes(resets_at) -> int | None:
 
 
 def fetch_all_accounts() -> list[dict]:
-    files = _cred_files()
-    if not files:
+    cfg = load_app_config()
+    results = _fetch_claude_accounts() if cfg["show_claude"] else []
+    if cfg["show_cursor"]:
+        try:
+            cur = cursor_usage.fetch_cursor_accounts()   # optional, never raises
+            if cfg["cursor_name"]:
+                for c in cur:
+                    c["label"] = cfg["cursor_name"]
+            results += cur
+        except Exception:
+            pass
+    if not results:
         return [{"label": "No credentials", "ok": False,
                  "error": "Sign in via the login page",
                  "session_pct": 0, "session_min": None,
                  "weekly_pct":  0, "weekly_min":  None, "active": False}]
+    return results
+
+
+def _fetch_claude_accounts() -> list[dict]:
+    files = _cred_files()
     results = []
     for idx, path in enumerate(files):
         label = _account_label(path, idx)
@@ -583,14 +647,71 @@ def _draw_spark(g: Gfx, cx, cy, t: float, base_outer, inner_r, rays, color, cent
     g.fill_circle(cx, cy, max(1, inner_r - 2), center_col)
 
 
-def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: float) -> None:
+# Cube faces as (corner quad, base shade). Corners indexed (ix, iy, iz) in {0,1}.
+_CUBE_FACES = [
+    ([(0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0)], 1.00),  # top    (y+)
+    ([(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)], 0.28),  # bottom (y-)
+    ([(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], 0.72),  # front  (z+)
+    ([(0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0)], 0.46),  # back   (z-)
+    ([(0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0)], 0.54),  # left   (x-)
+    ([(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], 0.62),  # right  (x+)
+]
+
+
+def _cube_shade(shade: float, ok: bool) -> QColor:
+    r, gc, b = (236, 236, 242) if ok else (250, 92, 88)
+    return QColor(int(r * shade), int(gc * shade), int(b * shade))
+
+
+def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float) -> None:
+    """Cursor's cube logo, spinning about its vertical axis (Claude's spark analog)."""
+    breathe = 0.92 + 0.08 * math.sin(t * 1.6)
+    s = 3.9 * breathe
+    a = t * 0.9                       # spin
+    tilt = 0.60                       # fixed pitch so the lit top face shows
+    ca, sa = math.cos(a), math.sin(a)
+    ct, st = math.cos(tilt), math.sin(tilt)
+
+    def project(X, Y, Z):
+        x1 = X * ca + Z * sa          # yaw about vertical axis
+        z1 = -X * sa + Z * ca
+        y2 = Y * ct - z1 * st         # pitch to reveal the top
+        z2 = Y * st + z1 * ct
+        return (cx + x1, cy - y2, z2)  # screen y is downward → negate
+
+    P = {(ix, iy, iz): project((ix * 2 - 1) * s, (iy * 2 - 1) * s, (iz * 2 - 1) * s)
+         for ix in (0, 1) for iy in (0, 1) for iz in (0, 1)}
+
+    blip = (int(time.time() * 1000) % 5000) < 450
+    faces = []
+    for quad, shade in _CUBE_FACES:
+        pts = [P[v] for v in quad]
+        # Back-face cull via screen-space signed area (screen y is downward).
+        area = ((pts[1][0] - pts[0][0]) * (pts[2][1] - pts[0][1])
+                - (pts[1][1] - pts[0][1]) * (pts[2][0] - pts[0][0]))
+        if area <= 0:
+            continue
+        depth = sum(p[2] for p in pts) / 4
+        faces.append((depth, pts, shade))
+
+    faces.sort(key=lambda f: f[0])    # painter's algorithm: far first
+    for _depth, pts, shade in faces:
+        col = C_TEXT if blip else _cube_shade(shade, ok)
+        g.fill_triangle(pts[0][0], pts[0][1], pts[1][0], pts[1][1],
+                        pts[2][0], pts[2][1], col)
+        g.fill_triangle(pts[0][0], pts[0][1], pts[2][0], pts[2][1],
+                        pts[3][0], pts[3][1], col)
+
+
+def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: float,
+                      brand: QColor = C_CLAUDE) -> None:
     idle = pct < 0
     col = C_DIM if idle else _pct_color(pct)
     red = (not idle and ok and pct >= 85)
     num_col = col if ok else C_DIM
     now_ms = int(time.time() * 1000)
 
-    g.text(label, 6, y0, C_CLAUDE if ok else C_DIM, 1)
+    g.text(label, 6, y0, brand if ok else C_DIM, 1)
     lw = _text_w(label, 1)
     _draw_badge(g, 6 + lw + 5, y0 - 1, badge, C_DIM)
 
@@ -610,7 +731,7 @@ def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: flo
     rs = "idle" if idle else _fmt_dur(reset_min)
     g.text("RESETS", 160 - 6 - _text_w("RESETS", 1), y0 + 11, C_DIM, 1)
     rw = _text_w(rs, 2)
-    _draw_clock(g, 160 - 6 - rw - 8, y0 + 27, C_DIM if idle else C_CLAUDE)
+    _draw_clock(g, 160 - 6 - rw - 8, y0 + 27, C_DIM if idle else brand)
     g.text(rs, 160 - 6 - rw, y0 + 22, C_DIM if idle else C_TEXT, 2)
 
     meter_col = None if idle else (C_RED if red else col)
@@ -625,32 +746,38 @@ def _draw_dashboard(g: Gfx, d: dict, t: float,
         acct = acct[:23]
     ok = d.get("ok", True)
 
+    cursor = d.get("kind") == "cursor"
+    brand = C_CURSOR if cursor else C_CLAUDE
+
     g.text(acct, 5, 2, C_DIM if ok else C_RED, 1)
     g.draw_poll_ring(138, 6, 5, poll_frac, fetching, t)
-    blip = ok and (int(time.time() * 1000) % 5000) < 450
-    spark_col = C_CLAUDE if ok else C_RED
-    _draw_spark(g, 152, 6, t, 7 if blip else 6, 2, 6, spark_col,
-                C_TEXT if blip else spark_col)
+    if cursor:
+        _draw_cursor_mark(g, 152, 6, ok, t)
+    else:
+        blip = ok and (int(time.time() * 1000) % 5000) < 450
+        spark_col = C_CLAUDE if ok else C_RED
+        _draw_spark(g, 152, 6, t, 7 if blip else 6, 2, 6, spark_col,
+                    C_TEXT if blip else spark_col)
     g.draw_fast_hline(0, 12, 160, C_ACCENT if ok else C_RED)
 
     sess_pct = s["pct"] if s.get("active", True) else -1
-    _draw_metric_card(g, 16, "SESSION", "5h", sess_pct,
-                      s.get("resets_in_min", 0) if sess_pct >= 0 else 0, ok, t)
+    _draw_metric_card(g, 16, s.get("label", "SESSION"), s.get("badge", "5h"), sess_pct,
+                      s.get("resets_in_min", 0) if sess_pct >= 0 else 0, ok, t, brand)
 
     g.draw_fast_hline(6, 71, 148, C_TRACK)
 
-    _draw_metric_card(g, 75, "WEEKLY", w.get("badge", "7d"), w["pct"],
-                      w.get("resets_in_min", 0), ok, t)
+    _draw_metric_card(g, 75, w.get("label", "WEEKLY"), w.get("badge", "7d"), w["pct"],
+                      w.get("resets_in_min", 0), ok, t, brand)
 
 
 def _draw_boot(g: Gfx, status: str, t: float) -> None:
     err = bool(re.search(r"wait|unreach|error|fail", status, re.I))
     col = C_RED if err else C_CLAUDE
     _draw_spark(g, 80, 36, t, 18, 5, 8, col, C_TEXT)
-    tw = _text_w("CLAUDE", 2)
-    g.text("CLAUDE", (160 - tw) // 2, 64, C_TEXT, 2)
-    tw2 = _text_w("usage monitor", 1)
-    g.text("usage monitor", (160 - tw2) // 2, 84, C_DIM, 1)
+    tw = _text_w("TOKEN", 2)
+    g.text("TOKEN", (160 - tw) // 2, 64, C_TEXT, 2)
+    tw2 = _text_w("MAXXING", 1)
+    g.text("MAXXING", (160 - tw2) // 2, 84, C_DIM, 1)
     tx, tw_bar, ty = 34, 92, 104
     g.fill_rect(tx, ty, tw_bar, 3, C_TRACK)
     now_ms = int(time.time() * 1000)
@@ -771,6 +898,22 @@ class FetchThread(QThread):
         self.done.emit(fetch_all_accounts())
 
 
+class CursorFetchThread(QThread):
+    """Fetch only the Cursor card (no Claude API call), applying the name override."""
+    done = pyqtSignal(list)
+
+    def run(self):
+        try:
+            accts = cursor_usage.fetch_cursor_accounts()
+            name = load_app_config()["cursor_name"]
+            if name:
+                for c in accts:
+                    c["label"] = name
+            self.done.emit(accts)
+        except Exception:
+            self.done.emit([])
+
+
 class AuthThread(QThread):
     done = pyqtSignal(bool, str)   # (success, error_message)
 
@@ -823,7 +966,7 @@ class OverlayWindow(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        pad = 28
+        pad = PANEL_PAD
         self.resize(PANEL_W + pad * 2, PANEL_H + pad * 2)
         self.setMinimumSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
         self.show()
@@ -861,7 +1004,7 @@ class OverlayWindow(QWidget):
         self._stack.addWidget(self._frame)
 
         lay = QVBoxLayout(self._frame)
-        lay.setContentsMargins(28, 28, 28, 28)
+        lay.setContentsMargins(PANEL_PAD, PANEL_PAD, PANEL_PAD, PANEL_PAD)
         lay.setSpacing(0)
 
         self._canvas = DashboardCanvas(self._frame)
@@ -966,42 +1109,65 @@ class OverlayWindow(QWidget):
         self._settings_frame.setStyleSheet("background: transparent;")
         self._stack.addWidget(self._settings_frame)
 
-        slay = QVBoxLayout(self._settings_frame)
-        slay.setContentsMargins(28, 28, 28, 28)
-        slay.setSpacing(8)
+        chk_style = ("color: #C8C8D8; font-size: 10px;"
+                     " background: transparent; spacing: 6px;")
+        sub_style = "color: #808098; font-size: 9px; background: transparent;"
 
-        shdr = QHBoxLayout()
-        stitle = QLabel("Account settings")
+        slay = QVBoxLayout(self._settings_frame)
+        slay.setContentsMargins(16, 14, 16, 14)
+        slay.setSpacing(5)
+
+        stitle = QLabel("Settings")
         stitle.setStyleSheet(
             "color: #EBEBF0; font-size: 12px; font-weight: 700; background: transparent;")
-        shdr.addWidget(stitle, 1)
-        slay.addLayout(shdr)
+        slay.addWidget(stitle)
+        slay.addWidget(self._divider(1))
 
-        slay.addWidget(self._divider(2))
+        # ── Per-account section (Claude only; hidden for Cursor) ────────────
+        self._sett_account_box = QWidget()
+        self._sett_account_box.setStyleSheet("background: transparent;")
+        abox = QVBoxLayout(self._sett_account_box)
+        abox.setContentsMargins(0, 0, 0, 0)
+        abox.setSpacing(4)
 
         nlbl = QLabel("Display name")
-        nlbl.setStyleSheet("color: #808098; font-size: 9px; background: transparent;")
-        slay.addWidget(nlbl)
+        nlbl.setStyleSheet(sub_style)
+        abox.addWidget(nlbl)
 
         self._sett_name = QLineEdit()
         self._sett_name.setPlaceholderText("e.g. Personal, Work…")
         self._sett_name.setStyleSheet(self._FIELD_STYLE)
-        slay.addWidget(self._sett_name)
+        abox.addWidget(self._sett_name)
 
         self._sett_auto = QCheckBox("Auto-start 5h session when idle")
-        self._sett_auto.setStyleSheet(
-            "color: #C8C8D8; font-size: 10px; background: transparent; spacing: 6px;")
+        self._sett_auto.setStyleSheet(chk_style)
         self._sett_auto.setToolTip(
             "When SESSION is idle, send one minimal Haiku message (~22 tokens) "
             "to anchor a new 5h block — same as the desk gadget.")
-        slay.addWidget(self._sett_auto)
+        abox.addWidget(self._sett_auto)
+        slay.addWidget(self._sett_account_box)
 
-        hint = QLabel(
-            "Shown in the dashboard header (max 23 chars on screen). "
-            "Auto-start runs once per idle period.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #52526A; font-size: 9px; background: transparent;")
-        slay.addWidget(hint)
+        # ── Sources section (global) ───────────────────────────────────────
+        srclbl = QLabel("SOURCES")
+        srclbl.setStyleSheet(sub_style + " font-weight: 700;")
+        slay.addWidget(srclbl)
+
+        self._sett_show_claude = QCheckBox("Show Claude")
+        self._sett_show_claude.setStyleSheet(chk_style)
+        slay.addWidget(self._sett_show_claude)
+
+        self._sett_show_cursor = QCheckBox("Show Cursor (Auto + API)")
+        self._sett_show_cursor.setStyleSheet(chk_style)
+        slay.addWidget(self._sett_show_cursor)
+
+        cnlbl = QLabel("Cursor display name")
+        cnlbl.setStyleSheet(sub_style)
+        slay.addWidget(cnlbl)
+
+        self._sett_cursor_name = QLineEdit()
+        self._sett_cursor_name.setPlaceholderText("e.g. Cursor, Work Cursor…")
+        self._sett_cursor_name.setStyleSheet(self._FIELD_STYLE)
+        slay.addWidget(self._sett_cursor_name)
 
         slay.addStretch()
 
@@ -1070,31 +1236,65 @@ class OverlayWindow(QWidget):
         self._refresh_display()
 
     def _show_settings(self):
-        if not self._accounts:
-            return
-        a = self._accounts[self._acct_idx]
-        path = a.get("path")
-        if not path:
-            return
+        # Per-account fields only apply to Claude accounts (those with a path);
+        # the Sources section is global and always shown.
+        path = None
+        if self._accounts:
+            path = self._accounts[self._acct_idx].get("path")
         self._settings_path = path
-        cfg = _account_settings(path)
-        self._sett_name.setText(cfg["name"] or a.get("label", ""))
-        self._sett_auto.setChecked(cfg["auto_start"])
+        if path:
+            cfg = _account_settings(path)
+            self._sett_name.setText(
+                cfg["name"] or self._accounts[self._acct_idx].get("label", ""))
+            self._sett_auto.setChecked(cfg["auto_start"])
+            self._sett_account_box.show()
+        else:
+            self._sett_account_box.hide()
+
+        app = load_app_config()
+        self._sett_show_claude.setChecked(app["show_claude"])
+        self._sett_show_cursor.setChecked(app["show_cursor"])
+        self._sett_cursor_name.setText(app["cursor_name"])
         self._stack.setCurrentIndex(2)
 
     def _save_settings(self):
-        if not self._settings_path:
-            return
-        name = self._sett_name.text().strip()
-        auto = self._sett_auto.isChecked()
-        _save_account_settings(self._settings_path, name=name, auto_start=auto)
-        if self._accounts and self._acct_idx < len(self._accounts):
-            a = self._accounts[self._acct_idx]
-            if a.get("path") == self._settings_path:
-                a["label"] = name or _account_label(
-                    self._settings_path, self._acct_idx)
+        if self._settings_path:
+            name = self._sett_name.text().strip()
+            _save_account_settings(self._settings_path, name=name,
+                                   auto_start=self._sett_auto.isChecked())
+            if self._accounts and self._acct_idx < len(self._accounts):
+                a = self._accounts[self._acct_idx]
+                if a.get("path") == self._settings_path:
+                    a["label"] = name or _account_label(
+                        self._settings_path, self._acct_idx)
+
+        prev = load_app_config()
+        show_claude = self._sett_show_claude.isChecked()
+        show_cursor = self._sett_show_cursor.isChecked()
+        cursor_name = self._sett_cursor_name.text().strip()
+        save_app_config(show_claude=show_claude, show_cursor=show_cursor,
+                        cursor_name=cursor_name)
+
+        # Apply toggles/rename from cache — NO API call. Hiding a source or
+        # renaming Cursor never re-polls (the Claude usage API is rate-limited).
+        kept = []
+        for a in self._accounts:
+            kind = a.get("kind", "claude")
+            if kind == "claude" and not show_claude:
+                continue
+            if kind == "cursor" and not show_cursor:
+                continue
+            if kind == "cursor" and cursor_name:
+                a["label"] = cursor_name
+            kept.append(a)
+        self._accounts = kept
+        self._acct_idx = 0
         self._stack.setCurrentIndex(0)
         self._refresh_display()
+        # Re-enabling Cursor repopulates instantly (its endpoint isn't rate-limited).
+        # Claude is never fetched on save — it appears on the next 2-min poll.
+        if show_cursor and not prev["show_cursor"]:
+            self._fetch_cursor_only()
 
     # ── Auth flow ─────────────────────────────────────────────────────────────
 
@@ -1209,6 +1409,31 @@ class OverlayWindow(QWidget):
         self._canvas.mark_refreshed()
         self._refresh_display()
 
+    def _fetch_cursor_only(self):
+        """Refresh just the Cursor card (its endpoint isn't rate-limited).
+
+        Used when Cursor is re-enabled in Settings so it appears immediately,
+        without re-polling the rate-limited Claude usage API.
+        """
+        if getattr(self, "_cursor_fetching", False):
+            return
+        self._cursor_fetching = True
+        thread = CursorFetchThread(self)
+        thread.done.connect(self._on_cursor_data)
+        thread.done.connect(lambda: setattr(self, "_cursor_fetching", False))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_cursor_data(self, cursor_accts: list[dict]):
+        if not load_app_config()["show_cursor"]:
+            return
+        # Replace any cached Cursor entries with the fresh ones.
+        self._accounts = [a for a in self._accounts if a.get("kind") != "cursor"]
+        self._accounts += cursor_accts
+        if self._acct_idx >= len(self._accounts):
+            self._acct_idx = 0
+        self._refresh_display()
+
     def _rotate_account(self):
         if len(self._accounts) > 1:
             self._acct_idx = (self._acct_idx + 1) % len(self._accounts)
@@ -1231,17 +1456,26 @@ class OverlayWindow(QWidget):
             acct = acct[:23]
         sess_min = a.get("session_min") or 0
         week_min = a.get("weekly_min") or 0
+        cursor = a.get("kind") == "cursor"
+        # Cursor reports two monthly pools (Auto+Composer, API); Claude reports
+        # the rolling 5h session + 7d weekly windows.
+        s_label, s_badge = ("AUTO", "mo") if cursor else ("SESSION", "5h")
+        w_label, w_badge = ("API",  "mo") if cursor else ("WEEKLY",  "7d")
         return {
             "ok":      a["ok"],
             "account": acct,
+            "kind":    a.get("kind", "claude"),
             "session": {
+                "label":         s_label,
+                "badge":         s_badge,
                 "pct":           a["session_pct"] if a.get("active") else -1,
                 "resets_in_min": sess_min,
                 "active":        a.get("active", False),
             },
             "weekly": {
+                "label":         w_label,
+                "badge":         w_badge,
                 "pct":           a["weekly_pct"],
-                "badge":         "7d",
                 "resets_in_min": week_min,
             },
         }
@@ -1357,10 +1591,9 @@ class OverlayWindow(QWidget):
                 a_home.triggered.connect(self._go_home)
                 menu.addAction(a_home)
 
-            if self._accounts and self._accounts[self._acct_idx].get("path"):
-                a_sett = QAction("\u2699  Settings", self)
-                a_sett.triggered.connect(self._show_settings)
-                menu.addAction(a_sett)
+            a_sett = QAction("\u2699  Settings", self)
+            a_sett.triggered.connect(self._show_settings)
+            menu.addAction(a_sett)
 
             menu.addSeparator()
 
@@ -1403,7 +1636,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
-    app.setApplicationName("Claude Monitor")
+    app.setApplicationName("Token Maxxing")
 
     font = QFont("Segoe UI", 10) if sys.platform == "win32" else QFont("SF Pro Display", 10)
     app.setFont(font)

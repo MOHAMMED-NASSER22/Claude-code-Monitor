@@ -1,6 +1,6 @@
-# Claude Usage Monitor — Windows Desktop
+# Token Maxxing — Windows Desktop
 
-Self-contained Windows desktop app: a floating always-on-top widget showing Claude **SESSION (5h)** and **WEEKLY (7d)** usage — the same numbers as Claude Code `/usage` and the ESP8266 desk gadget.
+Self-contained Windows desktop app: a floating always-on-top widget showing Claude **SESSION (5h)** and **WEEKLY (7d)** usage (the same numbers as Claude Code `/usage` and the ESP8266 desk gadget) plus Cursor **Auto** and **API** pool usage.
 
 This folder is **isolated from the firmware** (`claude_monitor/`, `token_bridge.py`, etc.). Nothing here is required for the ESP8266 build.
 
@@ -24,7 +24,7 @@ cd windows
 .\build.bat
 ```
 
-Output: `windows\dist\ClaudeMonitor.exe`
+Output: `windows\dist\TokenMaxxing.exe`
 
 ## First-time sign-in
 
@@ -49,7 +49,7 @@ You can also mint credentials with the repo’s `mint_token.sh` at the project r
 
 ## Settings (right-click → ⚙ Settings)
 
-Per account, stored in the credentials JSON:
+**Per Claude account** (shown only on a Claude card), stored in that account's credentials JSON:
 
 | Field | Key | Default |
 |-------|-----|---------|
@@ -58,11 +58,40 @@ Per account, stored in the credentials JSON:
 
 **Auto-start** matches the ESP8266 `AUTO_START_SESSION` behavior: when SESSION is idle, sends one minimal Haiku message (~22 tokens) to anchor a new 5h block.
 
+**Sources** (global), stored in `%USERPROFILE%\.claude_usage_bridge\overlay_config.json`:
+
+| Field | Key | Default |
+|-------|-----|---------|
+| Show Claude | `show_claude` | on |
+| Show Cursor (Auto + API) | `show_cursor` | on |
+| Cursor display name | `cursor_name` | account email |
+
+Toggle either source off to hide it (or to show just one). Saving re-fetches so the cards update immediately.
+
+## Cursor usage (Auto + API pools)
+
+If [Cursor](https://cursor.com) is installed and signed in on the same machine, the
+overlay adds a **Cursor** card to the cycle showing your two monthly pools:
+
+| Card | Source |
+|------|--------|
+| **AUTO** | Auto + Composer pool (`autoPercentUsed`) |
+| **API**  | API pool — Claude/GPT/Gemini/Grok (`apiPercentUsed`) |
+
+The token is read locally from Cursor's own store
+(`%APPDATA%\Cursor\User\globalStorage\state.vscdb`, key `cursorAuth/accessToken`)
+read-only, and only ever sent to Cursor's own usage endpoint
+(`cursor.com/api/dashboard/get-current-period-usage`). Nothing to configure — if
+Cursor isn't installed, no extra card appears. The pool resets badge is `mo`
+(monthly billing cycle).
+
 ## Polling & rate limits
 
-- Auto-refresh every **1 minute**
+- Auto-refresh every **2 minutes**
 - Header ring shows time until next refresh
-- Manual **Refresh now**: max **2 per minute** (API returns HTTP 429 if polled too aggressively)
+- Manual **Refresh now**: max **2 per minute**. The Claude usage API is rate-limited
+  (~6 req/5 min); on HTTP 429 the app honors the server's `Retry-After` and pauses
+  polling until the cooldown clears
 
 ## Design
 
@@ -70,13 +99,14 @@ UI layout mirrors `../simulator.html` and `../design-package/` (160×128 TFT des
 
 ## Distribute
 
-`dist/` and `build/` are gitignored. Attach `ClaudeMonitor.exe` to a [GitHub Release](https://github.com/aabdlwahab/Claude-code-Monitor/releases) — see issue #1.
+`dist/` and `build/` are gitignored. Attach `TokenMaxxing.exe` to a [GitHub Release](https://github.com/aabdlwahab/Claude-code-Monitor/releases) — see issue #1.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `claude_monitor_overlay.py` | Main app (PyQt6) |
+| `cursor_usage.py` | Optional Cursor Auto + API usage source |
 | `build.bat` | PyInstaller one-file build |
 | `requirements.txt` | Python dependencies |
-| `ClaudeMonitor.spec` | PyInstaller spec (optional; `build.bat` uses CLI flags) |
+| `TokenMaxxing.spec` | PyInstaller spec (optional; `build.bat` uses CLI flags) |
