@@ -1,0 +1,17 @@
+{
+  "format": "RGB565 (16-bit). hex is the 24-bit equivalent for design tools.",
+  "background": "#000000",
+  "colors": {
+    "BG":     { "hex": "#000000", "rgb565": "0x0000", "role": "background" },
+    "TEXT":   { "hex": "#FFFFFF", "rgb565": "0xFFFF", "role": "primary text / numerals" },
+    "DIM":    { "hex": "#808080", "rgb565": "0x8410", "role": "secondary text, labels, hairlines" },
+    "TRACK":  { "hex": "#202020", "rgb565": "0x2104", "role": "empty portion of a bar/gauge" },
+    "ACCENT": { "hex": "#00A8F8", "rgb565": "0x055F", "role": "header bar / structural accent" },
+    "CLAUDE": { "hex": "#D87450", "rgb565": "0xDBAA", "role": "brand spark + section labels" },
+    "GREEN":  { "hex": "#28BC50", "rgb565": "0x2DEA", "role": "usage < 60%" },
+    "YELLOW": { "hex": "#F8CC00", "rgb565": "0xFE60", "role": "usage 60-85%" },
+    "RED":    { "hex": "#F83430", "rgb565": "0xF9A6", "role": "usage >= 85% / stale / error" }
+  },
+  "usage_thresholds": { "green": "pct < 60", "yellow": "60 <= pct < 85", "red": "pct >= 85" },
+  "notes": "Adding colors is fine: give a hex, RGB565 conversion is r>>3<<11 | g>>2<<5 | b>>3."
+}

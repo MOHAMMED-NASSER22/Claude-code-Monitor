@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Usage Monitor — screen simulator (160×128 ST7735)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#15161a; color:#e6e6e6; font:14px/1.5 system-ui,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px; }
+  h1 { font-size:18px; font-weight:500; margin:0 0 4px; }
+  p.sub { color:#9a9a9a; margin:0 0 20px; }
+  .stage { display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }
+  .device { background:#0a0a0a; border:6px solid #222; border-radius:12px; padding:6px; }
+  canvas { display:block; width:480px; height:384px; image-rendering:pixelated; border-radius:3px; }
+  .panel { flex:1; min-width:220px; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
+  button { background:#1e1f24; color:#ddd; border:1px solid #34353c; border-radius:7px;
+           padding:6px 10px; font:13px system-ui; cursor:pointer; }
+  button.on { background:#D87450; color:#1a1a1a; border-color:#D87450; }
+  .legend { display:grid; grid-template-columns:1fr 1fr; gap:4px 14px; font-size:12px; color:#bbb; }
+  .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:-1px; margin-right:6px; }
+  code { background:#000; padding:1px 5px; border-radius:4px; color:#D8A070; }
+  .files { color:#9a9a9a; font-size:12px; margin-top:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Claude Usage Monitor — screen simulator</h1>
+  <p class="sub">160×128 ST7735, RGB565, 6×8 px font, ~30 fps. Canvas is shown at 3×.
+     The <code>g.*</code> API maps 1:1 to firmware <code>tft.*</code> — see CONSTRAINTS.md.</p>
+
+  <div class="stage">
+    <div class="device"><canvas id="screen" width="160" height="128"></canvas></div>
+    <div class="panel">
+      <div class="btns" id="btns"></div>
+      <div class="legend" id="legend"></div>
+      <p class="files">To redesign, edit <code>drawDashboard()</code> and <code>drawBoot()</code>
+        in the DESIGN AREA below. Render covers all states via the buttons.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================================
+   PALETTE  (mirror of palette.json)
+   ========================================================================== */
+const PAL = {
+  BG:'#000000', TEXT:'#FFFFFF', DIM:'#808080', TRACK:'#202020',
+  ACCENT:'#00A8F8', CLAUDE:'#D87450', GREEN:'#28BC50', YELLOW:'#F8CC00', RED:'#F83430'
+};
+
+/* ============================================================================
+   GFX — a minimal Adafruit_GFX work-alike on a 160x128 canvas.
+   Each method has a 1:1 firmware equivalent (tft.<same>). text() == setCursor +
+   setTextColor + setTextSize + print. Font cell is 6*size wide, advance 6*size.
+   ========================================================================== */
+class GFX {
+  constructor(ctx){ this.c = ctx; this.c.imageSmoothingEnabled = false; }
+  fillScreen(col){ this.fillRect(0,0,160,128,col); }
+  fillRect(x,y,w,h,col){ this.c.fillStyle=col; this.c.fillRect(x,y,w,h); }
+  drawRect(x,y,w,h,col){ this.c.fillStyle=col;
+    this.c.fillRect(x,y,w,1); this.c.fillRect(x,y+h-1,w,1);
+    this.c.fillRect(x,y,1,h); this.c.fillRect(x+w-1,y,1,h); }
+  drawRoundRect(x,y,w,h,r,col){ this.c.fillStyle=col;     // close enough for layout
+    this.c.fillRect(x+r,y,w-2*r,1); this.c.fillRect(x+r,y+h-1,w-2*r,1);
+    this.c.fillRect(x,y+r,1,h-2*r); this.c.fillRect(x+w-1,y+r,1,h-2*r);
+    this.c.fillRect(x+1,y+1,r,1); this.c.fillRect(x+w-1-r,y+1,r,1);
+    this.c.fillRect(x+1,y+h-2,r,1); this.c.fillRect(x+w-1-r,y+h-2,r,1); }
+  fillRoundRect(x,y,w,h,r,col){ this.fillRect(x+r,y,w-2*r,h,col); this.fillRect(x,y+r,w,h-2*r,col); }
+  drawFastHLine(x,y,w,col){ this.fillRect(x,y,w,1,col); }
+  drawFastVLine(x,y,h,col){ this.fillRect(x,y,1,h,col); }
+  drawLine(x0,y0,x1,y1,col){ this.c.strokeStyle=col; this.c.lineWidth=1;
+    this.c.beginPath(); this.c.moveTo(x0+.5,y0+.5); this.c.lineTo(x1+.5,y1+.5); this.c.stroke(); }
+  fillCircle(cx,cy,r,col){ this.c.fillStyle=col; this.c.beginPath();
+    this.c.arc(cx+.5,cy+.5,r,0,7); this.c.fill(); }
+  drawCircle(cx,cy,r,col){ this.c.strokeStyle=col; this.c.lineWidth=1; this.c.beginPath();
+    this.c.arc(cx+.5,cy+.5,r,0,7); this.c.stroke(); }
+  fillTriangle(x0,y0,x1,y1,x2,y2,col){ this.c.fillStyle=col; this.c.beginPath();
+    this.c.moveTo(x0,y0); this.c.lineTo(x1,y1); this.c.lineTo(x2,y2); this.c.closePath(); this.c.fill(); }
+  text(str,x,y,col,size=1){            // setCursor+setTextColor+setTextSize+print, in one
+    this.c.fillStyle=col; this.c.textBaseline='top';
+    this.c.font = (8*size)+'px "Courier New",monospace';
+    let cx=x; for(const ch of String(str)){ this.c.fillText(ch,cx,y); cx += 6*size; }
+  }
+}
+function textW(str,size=1){ return String(str).length*6*size; }
+function textCentered(g,str,y,col,size=1){ g.text(str,(160-textW(str,size))>>1,y,col,size); }
+
+/* ============================================================================
+   SHARED HELPERS — keep these in sync with the firmware (drawSpark, drawBar)
+   ========================================================================== */
+function barColor(pct){ return pct>=85?PAL.RED : pct>=60?PAL.YELLOW : PAL.GREEN; }
+
+function drawBar(g,x,y,w,h,pct){
+  pct = Math.max(0,Math.min(100,pct));
+  g.drawRoundRect(x,y,w,h,3,PAL.DIM);
+  g.fillRect(x+1,y+1,w-2,h-2,PAL.TRACK);
+  const fill = ((w-2)*pct/100)|0;
+  if(fill>0) g.fillRect(x+1,y+1,fill,h-2,barColor(pct));
+}
+
+// Segmented level meter. Solid fill up to pct, sliced into 10 segments by
+// 1px BG notches so it reads as a measured gauge. `col` = -1 -> empty/idle.
+function drawMeter(g,x,y,w,h,pct,col){
+  pct = Math.max(0,Math.min(100,pct));
+  g.fillRect(x,y,w,h,PAL.TRACK);                      // track
+  if(col!==-1){
+    const fw = Math.round(w*pct/100);
+    if(fw>0) g.fillRect(x,y,fw,h,col);                // fill
+  }
+  for(let i=1;i<10;i++) g.drawFastVLine(x+Math.round(w*i/10),y,h,PAL.BG); // notches
+  g.drawRect(x,y,w,h, col===PAL.RED?PAL.RED:PAL.DIM); // border (red when maxed)
+}
+
+// tiny 7px clock glyph (circle + two hands)
+function drawClock(g,cx,cy,col){
+  g.drawCircle(cx,cy,3,col);
+  g.drawLine(cx,cy,cx,cy-2,col);
+  g.drawLine(cx,cy,cx+2,cy,col);
+}
+
+// small outlined pill badge; returns its width
+function drawBadge(g,x,y,txt,col){
+  const w = textW(txt,1)+5;
+  g.drawRoundRect(x,y,w,10,2,col);
+  g.text(txt,x+3,y+2,col,1);
+  return w;
+}
+
+// breathing + rotating Claude spark (sunburst of petals)
+function drawSpark(g,cx,cy,t,baseOuter,innerR,rays,color,centerCol){
+  const rot=t*0.5, breathe=0.72+0.28*Math.sin(t*1.6);
+  let outer=baseOuter*breathe; if(outer<innerR+1) outer=innerR+1;
+  const da=0.45;
+  for(let i=0;i<rays;i++){
+    const a=rot+i*(Math.PI*2/rays);
+    const tx=cx+Math.cos(a)*outer, ty=cy+Math.sin(a)*outer;
+    const b1x=cx+Math.cos(a+da)*innerR, b1y=cy+Math.sin(a+da)*innerR;
+    const b2x=cx+Math.cos(a-da)*innerR, b2y=cy+Math.sin(a-da)*innerR;
+    g.fillTriangle(tx,ty,b1x,b1y,b2x,b2y,color);
+  }
+  g.fillCircle(cx,cy,innerR,color);
+  g.fillCircle(cx,cy,Math.max(1,innerR-2),centerCol);
+}
+
+function fmtResets(min){ if(min<=0) return 'idle';
+  const h=(min/60)|0, m=min%60; return h>0?`resets in ${h}h${String(m).padStart(2,'0')}m`:`resets in ${m}m`; }
+function fmtWeek(min){ if(min<=0) return 'resetting...';
+  const d=(min/1440)|0, h=((min%1440)/60)|0;
+  return d>0?`resets in ${d}d ${h}h`:(h>0?`resets in ${h}h`:`resets in ${min%60}m`); }
+
+/* ============================================================================
+   ███  DESIGN AREA — Claude: redesign these two functions.  ███
+   This is the CURRENT firmware layout (your baseline). Change freely, but only
+   use PAL colors, the g.* primitives, and fields from data-contract.json.
+   ========================================================================== */
+
+// compact duration for the reset readout: "47m" / "4h24m" / "4d 15h"
+function fmtDur(min){
+  if(min<=0) return '--';
+  const d=(min/1440)|0;
+  if(d>=1){ const h=((min%1440)/60)|0; return `${d}d ${h}h`; }
+  const h=(min/60)|0, m=min%60;
+  return h>0?`${h}h${String(m).padStart(2,'0')}m`:`${m}m`;
+}
+
+// One usage metric as an instrument card. pct<0 => idle (calm / empty).
+// Hierarchy: a BIG color-coded % is the hero (how full), a size-2 reset
+// readout answers "when", money is the dim detail line.
+function drawMetricCard(g, y0, label, badge, pct, cost, budget, resetMin, ok, t){
+  const idle = pct<0;
+  const col  = idle ? PAL.DIM : barColor(pct);
+  const red  = (!idle && ok && pct>=85);
+  const numCol = ok ? col : PAL.DIM;            // freeze value to DIM when stale
+
+  // label + period badge
+  g.text(label, 6, y0, ok?PAL.CLAUDE:PAL.DIM, 1);
+  const lw = textW(label,1);
+  drawBadge(g, 6+lw+5, y0-1, badge, PAL.DIM);
+
+  // blinking warning triangle by the label when maxed out
+  if(red && (Date.now()%900)<450){
+    const wx = 6+lw+5+textW(badge,1)+5+10;
+    g.fillTriangle(wx-5,y0+8, wx+5,y0+8, wx,y0-1, PAL.RED);
+    g.fillRect(wx,y0+2,1,3,PAL.BG); g.fillRect(wx,y0+6,1,1,PAL.BG);
+  }
+
+  // BIG percentage hero (left)
+  if(idle){
+    g.text('IDLE', 6, y0+15, PAL.DIM, 2);
+  } else {
+    const ps = String(pct);
+    g.text(ps, 6, y0+11, numCol, 3);
+    g.text('%', 6+textW(ps,3)+2, y0+19, numCol, 2);
+  }
+
+  // reset readout (right): label + clock + size-2 value
+  const rs = idle ? 'idle' : fmtDur(resetMin);
+  g.text('RESETS', 160-6-textW('RESETS',1), y0+11, PAL.DIM, 1);
+  const rw = textW(rs,2);
+  drawClock(g, 160-6-rw-8, y0+27, idle?PAL.DIM:PAL.CLAUDE);
+  g.text(rs, 160-6-rw, y0+22, idle?PAL.DIM:PAL.TEXT, 2);
+
+  // segmented meter
+  drawMeter(g, 6, y0+40, 148, 7, idle?0:pct, idle?-1:(red?PAL.RED:col));
+}
+
+function drawBoot(g, status, t){
+  const err = /wait|unreach|error|fail/i.test(status);   // bridge problem
+  const col = err ? PAL.RED : PAL.CLAUDE;
+  // brand spark
+  drawSpark(g, 80, 36, t, 18, 5, 8, col, PAL.TEXT);
+  // wordmark + subtitle
+  textCentered(g, 'CLAUDE', 64, PAL.TEXT, 2);
+  textCentered(g, 'usage monitor', 84, PAL.DIM, 1);
+  // progress track
+  const tx=34, tw=92, ty=104;
+  g.fillRect(tx,ty,tw,3,PAL.TRACK);
+  if(err){
+    if((Date.now()%900)<450) g.fillRect(tx,ty,tw,3,PAL.RED);   // pulse = stuck
+  } else {
+    const seg=22, span=tw-seg, p=Math.sin(t*1.3)*0.5+0.5;      // ping-pong sweep
+    g.fillRect(tx+Math.round(span*p),ty,seg,3,PAL.ACCENT);
+  }
+  textCentered(g, status, 114, err?PAL.RED:PAL.DIM, 1);
+}
+
+function drawDashboard(g, d, t){
+  const s = d.session, w = d.weekly;
+
+  // --- header: account (dim) + status spark + accent rule ---
+  let acct = d.account || 'CLAUDE USAGE';
+  if(acct.length>23) acct = acct.slice(0,23);
+  g.text(acct, 5, 2, d.ok?PAL.DIM:PAL.RED, 1);
+  const blip = d.ok && (Date.now()%5000)<450;            // gentle "fresh data" pop
+  const sparkCol = d.ok ? PAL.CLAUDE : PAL.RED;          // red spark when stale
+  drawSpark(g, 152, 6, t, blip?7:6, 2, 6, sparkCol, blip?PAL.TEXT:sparkCol);
+  g.drawFastHLine(0, 12, 160, d.ok?PAL.ACCENT:PAL.RED);
+
+  // --- SESSION (top) ---
+  drawMetricCard(g, 16, 'SESSION', '5h', s.active?s.pct:-1, s.cost, s.budget,
+                 s.active?s.resets_in_min:0, d.ok, t);
+
+  g.drawFastHLine(6, 71, 148, PAL.TRACK);                // divider
+
+  // --- WEEKLY (bottom) ---
+  drawMetricCard(g, 75, 'WEEKLY', w.days+'d', w.pct, w.cost, w.budget,
+                 w.resets_in_min, d.ok, t);
+}
+
+/* ============================================================================
+   ███  END DESIGN AREA  ███
+   ----------------------------------------------------------------------------
+   WHAT CHANGED & WHY (rationale)
+   • Hero numerics. Each metric leads with a size-3 (18×24) percentage that is
+     itself color-coded (green/yellow/red). The most urgent metric now "shouts"
+     in red while a calm one stays subdued — readable from across the desk
+     without parsing text. Replaces the old same-weight "$x / $y  n%" line.
+   • "When does it reset" is now first-class: a size-2 clock readout on the
+     right of each card (the other key decision input), instead of a dim 6px
+     footnote.
+   • SESSION vs WEEKLY are instantly told apart by position (top/bottom),
+     orange labels, and a period badge ("5h" / "Nd").
+   • Segmented meter (solid fill sliced by 1px BG notches + DIM border, red
+     border when maxed) reads as a measured gauge and stays 100% within
+     "solid fills / 1px lines only".
+   • Urgency: ≥85% paints the number, meter fill and border red and blinks a
+     warning triangle. Idle = "IDLE" + empty track (calm). Stale (ok=false)
+     freezes values to DIM and turns the header rule + status spark red.
+   • Header slimmed from a 16px cyan slab to a 1px ACCENT rule, reclaiming
+     vertical space for the big numbers. Brand spark kept as the status light.
+   • Boot: spark + wordmark + "usage monitor" + an indeterminate ACCENT sweep;
+     the "waiting for bridge" error pulses spark + bar red instead of sweeping.
+
+   FIRMWARE MAPPING (claude_monitor.ino) — every call has a 1:1 tft.* form:
+     g.fillRect/​drawRect/​drawRoundRect/​drawFastHLine/​drawFastVLine/​drawLine/
+     fillCircle/​drawCircle/​fillTriangle  → tft.<same>
+     g.text(s,x,y,c,sz) → tft.setTextColor(c); tft.setTextSize(sz);
+                          tft.setCursor(x,y); tft.print(s);
+   Suggested split: drawStatic() = header rule + labels + badges + dividers +
+   empty meters (drawn once). render(doc) = big % numbers, reset readouts,
+   money line, meter fill — repaint only on the 10s poll. headerSpark()/
+   splashFrame() = drawSpark()/boot sweep, double-buffered into a GFXcanvas16
+   and blitted with one drawRGBBitmap (no full-screen redraw per frame).
+   ========================================================================== */
+
+/* ---- sample data (mirror of data-contract.json examples) ---- */
+const EX = {
+  normal: { ok:true, account:'you@example.com',
+    session:{cost:15.2,budget:40,pct:38,resets_in_min:264,active:true},
+    weekly:{cost:186,budget:300,pct:62,days:4,resets_in_min:6712,resets_at:'Thu 08:00'} },
+  high: { ok:true, account:'you@example.com',
+    session:{cost:36.5,budget:40,pct:91,resets_in_min:47,active:true},
+    weekly:{cost:289,budget:300,pct:96,days:6,resets_in_min:980,resets_at:'Thu 08:00'} },
+  idle: { ok:true, account:'you@example.com',
+    session:{cost:0,budget:40,pct:0,resets_in_min:0,active:false},
+    weekly:{cost:24.7,budget:300,pct:8,days:2,resets_in_min:6712,resets_at:'Thu 08:00'} },
+  stale: { ok:false, account:'you@example.com',
+    session:{cost:15.2,budget:40,pct:38,resets_in_min:264,active:true},
+    weekly:{cost:186,budget:300,pct:62,days:4,resets_in_min:6712,resets_at:'Thu 08:00'} },
+};
+const SCREENS = {
+  'Boot · connecting': {type:'boot', status:'Connecting WiFi...'},
+  'Boot · fetching':   {type:'boot', status:'Fetching usage...'},
+  'Boot · waiting':    {type:'boot', status:'Waiting for bridge...'},
+  'Dash · normal':     {type:'dash', data:EX.normal},
+  'Dash · high usage': {type:'dash', data:EX.high},
+  'Dash · idle':       {type:'dash', data:EX.idle},
+  'Dash · stale':      {type:'dash', data:EX.stale},
+};
+let current = 'Dash · normal';
+
+/* ---- UI ---- */
+const g = new GFX(document.getElementById('screen').getContext('2d'));
+const btns = document.getElementById('btns');
+Object.keys(SCREENS).forEach(name=>{
+  const b=document.createElement('button'); b.textContent=name;
+  if(name===current) b.classList.add('on');
+  b.onclick=()=>{ current=name; [...btns.children].forEach(x=>x.classList.toggle('on',x===b)); };
+  btns.appendChild(b);
+});
+document.getElementById('legend').innerHTML = Object.entries(PAL)
+  .map(([k,v])=>`<div><span class="sw" style="background:${v}"></span>${k}</div>`).join('');
+
+function frame(){
+  const t = performance.now()*0.004;
+  g.fillScreen(PAL.BG);
+  const s = SCREENS[current];
+  if(s.type==='boot') drawBoot(g, s.status, t);
+  else                drawDashboard(g, s.data, t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

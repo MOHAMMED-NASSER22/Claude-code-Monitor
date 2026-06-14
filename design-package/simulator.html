@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Usage Monitor — screen simulator (160×128 ST7735)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#15161a; color:#e6e6e6; font:14px/1.5 system-ui,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px; }
+  h1 { font-size:18px; font-weight:500; margin:0 0 4px; }
+  p.sub { color:#9a9a9a; margin:0 0 20px; }
+  .stage { display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }
+  .device { background:#0a0a0a; border:6px solid #222; border-radius:12px; padding:6px; }
+  canvas { display:block; width:480px; height:384px; image-rendering:pixelated; border-radius:3px; }
+  .panel { flex:1; min-width:220px; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
+  button { background:#1e1f24; color:#ddd; border:1px solid #34353c; border-radius:7px;
+           padding:6px 10px; font:13px system-ui; cursor:pointer; }
+  button.on { background:#D87450; color:#1a1a1a; border-color:#D87450; }
+  .legend { display:grid; grid-template-columns:1fr 1fr; gap:4px 14px; font-size:12px; color:#bbb; }
+  .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:-1px; margin-right:6px; }
+  code { background:#000; padding:1px 5px; border-radius:4px; color:#D8A070; }
+  .files { color:#9a9a9a; font-size:12px; margin-top:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Claude Usage Monitor — screen simulator</h1>
+  <p class="sub">160×128 ST7735, RGB565, 6×8 px font, ~30 fps. Canvas is shown at 3×.
+     The <code>g.*</code> API maps 1:1 to firmware <code>tft.*</code> — see CONSTRAINTS.md.</p>
+
+  <div class="stage">
+    <div class="device"><canvas id="screen" width="160" height="128"></canvas></div>
+    <div class="panel">
+      <div class="btns" id="btns"></div>
+      <div class="legend" id="legend"></div>
+      <p class="files">To redesign, edit <code>drawDashboard()</code> and <code>drawBoot()</code>
+        in the DESIGN AREA below. Render covers all states via the buttons.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================================
+   PALETTE  (mirror of palette.json)
+   ========================================================================== */
+const PAL = {
+  BG:'#000000', TEXT:'#FFFFFF', DIM:'#808080', TRACK:'#202020',
+  ACCENT:'#00A8F8', CLAUDE:'#D87450', GREEN:'#28BC50', YELLOW:'#F8CC00', RED:'#F83430'
+};
+
+/* ============================================================================
+   GFX — a minimal Adafruit_GFX work-alike on a 160x128 canvas.
+   Each method has a 1:1 firmware equivalent (tft.<same>). text() == setCursor +
+   setTextColor + setTextSize + print. Font cell is 6*size wide, advance 6*size.
+   ========================================================================== */
+class GFX {
+  constructor(ctx){ this.c = ctx; this.c.imageSmoothingEnabled = false; }
+  fillScreen(col){ this.fillRect(0,0,160,128,col); }
+  fillRect(x,y,w,h,col){ this.c.fillStyle=col; this.c.fillRect(x,y,w,h); }
+  drawRect(x,y,w,h,col){ this.c.fillStyle=col;
+    this.c.fillRect(x,y,w,1); this.c.fillRect(x,y+h-1,w,1);
+    this.c.fillRect(x,y,1,h); this.c.fillRect(x+w-1,y,1,h); }
+  drawRoundRect(x,y,w,h,r,col){ this.c.fillStyle=col;     // close enough for layout
+    this.c.fillRect(x+r,y,w-2*r,1); this.c.fillRect(x+r,y+h-1,w-2*r,1);
+    this.c.fillRect(x,y+r,1,h-2*r); this.c.fillRect(x+w-1,y+r,1,h-2*r);
+    this.c.fillRect(x+1,y+1,r,1); this.c.fillRect(x+w-1-r,y+1,r,1);
+    this.c.fillRect(x+1,y+h-2,r,1); this.c.fillRect(x+w-1-r,y+h-2,r,1); }
+  fillRoundRect(x,y,w,h,r,col){ this.fillRect(x+r,y,w-2*r,h,col); this.fillRect(x,y+r,w,h-2*r,col); }
+  drawFastHLine(x,y,w,col){ this.fillRect(x,y,w,1,col); }
+  drawFastVLine(x,y,h,col){ this.fillRect(x,y,1,h,col); }
+  drawLine(x0,y0,x1,y1,col){ this.c.strokeStyle=col; this.c.lineWidth=1;
+    this.c.beginPath(); this.c.moveTo(x0+.5,y0+.5); this.c.lineTo(x1+.5,y1+.5); this.c.stroke(); }
+  fillCircle(cx,cy,r,col){ this.c.fillStyle=col; this.c.beginPath();
+    this.c.arc(cx+.5,cy+.5,r,0,7); this.c.fill(); }
+  drawCircle(cx,cy,r,col){ this.c.strokeStyle=col; this.c.lineWidth=1; this.c.beginPath();
+    this.c.arc(cx+.5,cy+.5,r,0,7); this.c.stroke(); }
+  fillTriangle(x0,y0,x1,y1,x2,y2,col){ this.c.fillStyle=col; this.c.beginPath();
+    this.c.moveTo(x0,y0); this.c.lineTo(x1,y1); this.c.lineTo(x2,y2); this.c.closePath(); this.c.fill(); }
+  text(str,x,y,col,size=1){            // setCursor+setTextColor+setTextSize+print, in one
+    this.c.fillStyle=col; this.c.textBaseline='top';
+    this.c.font = (8*size)+'px "Courier New",monospace';
+    let cx=x; for(const ch of String(str)){ this.c.fillText(ch,cx,y); cx += 6*size; }
+  }
+}
+function textW(str,size=1){ return String(str).length*6*size; }
+function textCentered(g,str,y,col,size=1){ g.text(str,(160-textW(str,size))>>1,y,col,size); }
+
+/* ============================================================================
+   SHARED HELPERS — keep these in sync with the firmware (drawSpark, drawBar)
+   ========================================================================== */
+function barColor(pct){ return pct>=85?PAL.RED : pct>=60?PAL.YELLOW : PAL.GREEN; }
+
+function drawBar(g,x,y,w,h,pct){
+  pct = Math.max(0,Math.min(100,pct));
+  g.drawRoundRect(x,y,w,h,3,PAL.DIM);
+  g.fillRect(x+1,y+1,w-2,h-2,PAL.TRACK);
+  const fill = ((w-2)*pct/100)|0;
+  if(fill>0) g.fillRect(x+1,y+1,fill,h-2,barColor(pct));
+}
+
+// breathing + rotating Claude spark (sunburst of petals)
+function drawSpark(g,cx,cy,t,baseOuter,innerR,rays,color,centerCol){
+  const rot=t*0.5, breathe=0.72+0.28*Math.sin(t*1.6);
+  let outer=baseOuter*breathe; if(outer<innerR+1) outer=innerR+1;
+  const da=0.45;
+  for(let i=0;i<rays;i++){
+    const a=rot+i*(Math.PI*2/rays);
+    const tx=cx+Math.cos(a)*outer, ty=cy+Math.sin(a)*outer;
+    const b1x=cx+Math.cos(a+da)*innerR, b1y=cy+Math.sin(a+da)*innerR;
+    const b2x=cx+Math.cos(a-da)*innerR, b2y=cy+Math.sin(a-da)*innerR;
+    g.fillTriangle(tx,ty,b1x,b1y,b2x,b2y,color);
+  }
+  g.fillCircle(cx,cy,innerR,color);
+  g.fillCircle(cx,cy,Math.max(1,innerR-2),centerCol);
+}
+
+function fmtResets(min){ if(min<=0) return 'idle';
+  const h=(min/60)|0, m=min%60; return h>0?`resets in ${h}h${String(m).padStart(2,'0')}m`:`resets in ${m}m`; }
+function fmtWeek(min){ if(min<=0) return 'resetting...';
+  const d=(min/1440)|0, h=((min%1440)/60)|0;
+  return d>0?`resets in ${d}d ${h}h`:(h>0?`resets in ${h}h`:`resets in ${min%60}m`); }
+
+/* ============================================================================
+   ███  DESIGN AREA — Claude: redesign these two functions.  ███
+   This is the CURRENT firmware layout (your baseline). Change freely, but only
+   use PAL colors, the g.* primitives, and fields from data-contract.json.
+   ========================================================================== */
+
+function drawBoot(g, status, t){
+  // big breathing spark + "Claude" wordmark + status line
+  drawSpark(g, 80, 38, t, 22, 6, 8, PAL.CLAUDE, PAL.TEXT);
+  g.text('Claude', 44, 78, PAL.CLAUDE, 2);
+  textCentered(g, status, 104, PAL.DIM, 1);
+}
+
+function drawDashboard(g, d, t){
+  const s = d.session, w = d.weekly;
+
+  // header bar: account + animated spark (also the status light)
+  g.fillRect(0,0,160,16, PAL.ACCENT);
+  let acct = d.account || 'CLAUDE  USAGE';
+  if(acct.length>22) acct = acct.slice(0,22);
+  g.text(acct, 4, 4, PAL.BG, 1);
+  const pop = (Date.now()%5000)<450;            // "pop" on fresh data
+  const sparkCol = d.ok ? PAL.CLAUDE : PAL.RED;  // red when stale
+  drawSpark(g, 148, 8, t, pop?7:6, 2, 6, sparkCol, pop?PAL.TEXT:sparkCol);
+
+  // SESSION
+  g.text('SESSION  (5h)', 6, 24, PAL.CLAUDE, 1);
+  g.text(`$${s.cost.toFixed(2)} / $${s.budget|0}  ${s.pct}%`, 6, 36, PAL.TEXT, 1);
+  drawBar(g, 6, 48, 148, 12, s.pct);
+  g.text(s.active ? fmtResets(s.resets_in_min) : 'idle', 6, 63, PAL.DIM, 1);
+
+  g.drawFastHLine(6, 70, 148, PAL.TRACK);        // divider
+
+  // WEEKLY
+  g.text('WEEKLY  (7d)', 6, 74, PAL.CLAUDE, 1);
+  g.text(`$${Math.round(w.cost)} / $${w.budget|0}  ${w.pct}%`, 6, 86, PAL.TEXT, 1);
+  drawBar(g, 6, 98, 148, 12, w.pct);
+  g.text(fmtWeek(w.resets_in_min), 6, 113, PAL.DIM, 1);
+}
+
+/* ============================================================================
+   ███  END DESIGN AREA  ███
+   ========================================================================== */
+
+/* ---- sample data (mirror of data-contract.json examples) ---- */
+const EX = {
+  normal: { ok:true, account:'you@example.com',
+    session:{cost:15.2,budget:40,pct:38,resets_in_min:264,active:true},
+    weekly:{cost:186,budget:300,pct:62,days:4,resets_in_min:6712,resets_at:'Thu 08:00'} },
+  high: { ok:true, account:'you@example.com',
+    session:{cost:36.5,budget:40,pct:91,resets_in_min:47,active:true},
+    weekly:{cost:289,budget:300,pct:96,days:6,resets_in_min:980,resets_at:'Thu 08:00'} },
+  idle: { ok:true, account:'you@example.com',
+    session:{cost:0,budget:40,pct:0,resets_in_min:0,active:false},
+    weekly:{cost:24.7,budget:300,pct:8,days:2,resets_in_min:6712,resets_at:'Thu 08:00'} },
+  stale: { ok:false, account:'you@example.com',
+    session:{cost:15.2,budget:40,pct:38,resets_in_min:264,active:true},
+    weekly:{cost:186,budget:300,pct:62,days:4,resets_in_min:6712,resets_at:'Thu 08:00'} },
+};
+const SCREENS = {
+  'Boot · connecting': {type:'boot', status:'Connecting WiFi...'},
+  'Boot · fetching':   {type:'boot', status:'Fetching usage...'},
+  'Boot · waiting':    {type:'boot', status:'Waiting for bridge...'},
+  'Dash · normal':     {type:'dash', data:EX.normal},
+  'Dash · high usage': {type:'dash', data:EX.high},
+  'Dash · idle':       {type:'dash', data:EX.idle},
+  'Dash · stale':      {type:'dash', data:EX.stale},
+};
+let current = 'Dash · normal';
+
+/* ---- UI ---- */
+const g = new GFX(document.getElementById('screen').getContext('2d'));
+const btns = document.getElementById('btns');
+Object.keys(SCREENS).forEach(name=>{
+  const b=document.createElement('button'); b.textContent=name;
+  if(name===current) b.classList.add('on');
+  b.onclick=()=>{ current=name; [...btns.children].forEach(x=>x.classList.toggle('on',x===b)); };
+  btns.appendChild(b);
+});
+document.getElementById('legend').innerHTML = Object.entries(PAL)
+  .map(([k,v])=>`<div><span class="sw" style="background:${v}"></span>${k}</div>`).join('');
+
+function frame(){
+  const t = performance.now()*0.004;
+  g.fillScreen(PAL.BG);
+  const s = SCREENS[current];
+  if(s.type==='boot') drawBoot(g, s.status, t);
+  else                drawDashboard(g, s.data, t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+{
+  "source": "GET http://<mac>:8088/usage  (bridge.py). The device polls this every 10s.",
+  "note": "These are the ONLY fields available to draw. Don't invent data. History/series are NOT available unless the bridge is extended to send them.",
+
+  "fields": {
+    "ok": "bool — true if the bridge served fresh data. false/unreachable => stale.",
+    "ts": "int — unix seconds of this snapshot.",
+    "account": "string — Claude account label shown in the header (email or custom).",
+    "session": {
+      "cost": "float USD spent in the current 5-hour block",
+      "tokens": "int tokens in the current block",
+      "budget": "float USD that = 100% on the session bar (user-set)",
+      "pct": "int 0-100 — cost/budget, clamped (drives bar + color)",
+      "resets_in_min": "int — minutes until the 5-hour block resets",
+      "active": "bool — false when no session is currently running (idle)"
+    },
+    "weekly": {
+      "cost": "float USD since the weekly reset",
+      "tokens": "int tokens since the weekly reset",
+      "budget": "float USD that = 100% on the weekly bar (user-set)",
+      "pct": "int 0-100 — cost/budget, clamped",
+      "days": "int — number of active days counted in this window",
+      "resets_in_min": "int — minutes until the weekly reset (can be days; format as Nd Nh)",
+      "resets_at": "string — short human reset time, e.g. 'Thu 08:00'"
+    }
+  },
+
+  "states": [
+    "boot_connecting  — no data yet, WiFi connecting (account empty). status: 'Connecting WiFi...'",
+    "boot_fetching    — WiFi up, first fetch in flight. status: 'Fetching usage...'",
+    "boot_waiting     — WiFi up but bridge unreachable. status: 'Waiting for bridge...'",
+    "dashboard_normal — fresh data, moderate usage",
+    "dashboard_high   — usage near/over limits (yellow/red)",
+    "dashboard_idle   — session.active=false (between sessions)",
+    "dashboard_stale  — ok=false: show last values but flag the status spark red"
+  ],
+
+  "examples": {
+    "dashboard_normal": {
+      "ok": true, "ts": 1781354224, "account": "you@example.com",
+      "session": { "cost": 15.2, "tokens": 4200000, "budget": 40, "pct": 38, "resets_in_min": 264, "active": true },
+      "weekly":  { "cost": 186.0, "tokens": 190000000, "budget": 300, "pct": 62, "days": 4, "resets_in_min": 6712, "resets_at": "Thu 08:00" }
+    },
+    "dashboard_high": {
+      "ok": true, "ts": 1781354224, "account": "you@example.com",
+      "session": { "cost": 36.5, "tokens": 9100000, "budget": 40, "pct": 91, "resets_in_min": 47, "active": true },
+      "weekly":  { "cost": 289.0, "tokens": 240000000, "budget": 300, "pct": 96, "days": 6, "resets_in_min": 980, "resets_at": "Thu 08:00" }
+    },
+    "dashboard_idle": {
+      "ok": true, "ts": 1781354224, "account": "you@example.com",
+      "session": { "cost": 0.0, "tokens": 0, "budget": 40, "pct": 0, "resets_in_min": 0, "active": false },
+      "weekly":  { "cost": 24.7, "tokens": 10900000, "budget": 300, "pct": 8, "days": 2, "resets_in_min": 6712, "resets_at": "Thu 08:00" }
+    },
+    "dashboard_stale": {
+      "ok": false, "ts": 1781350000, "account": "you@example.com",
+      "session": { "cost": 15.2, "tokens": 4200000, "budget": 40, "pct": 38, "resets_in_min": 264, "active": true },
+      "weekly":  { "cost": 186.0, "tokens": 190000000, "budget": 300, "pct": 62, "days": 4, "resets_in_min": 6712, "resets_at": "Thu 08:00" }
+    },
+    "boot_connecting": { "ok": false, "account": "", "status": "Connecting WiFi..." }
+  }
+}
