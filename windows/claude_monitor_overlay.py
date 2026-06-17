@@ -158,11 +158,15 @@ MANUAL_REFRESH_MAX    = 2       # max manual refreshes per rolling window
 MANUAL_REFRESH_WINDOW = 60.0    # seconds
 
 # Set from a 429's Retry-After header; usage polls/refreshes pause until then.
-_rate_limit_until = 0.0         # time.monotonic() value
+# Tracked on the WALL clock (time.time()), not time.monotonic(): on Windows the
+# monotonic clock freezes while the PC sleeps, so a cooldown set before sleep
+# would survive a multi-hour suspend and falsely show "Rate limited" on wake.
+# The wall clock advances through sleep, so the deadline expires as it should.
+_rate_limit_until = 0.0         # time.time() (wall-clock) deadline
 
 
 def _rate_limited_remaining() -> float:
-    return max(0.0, _rate_limit_until - time.monotonic())
+    return max(0.0, _rate_limit_until - time.time())
 
 # ── Palette — mirrors simulator.html PAL / palette.json ─────────────────────
 C_PANEL   = QColor(  0,   0,   0)        # BG   (#000000) dashboard fill
@@ -414,7 +418,9 @@ def _http_json(method: str, url: str, headers: dict | None = None,
             except (TypeError, ValueError):
                 ra = 0.0
             # Server sends Retry-After: ~299s. Fall back to 300s if absent.
-            _rate_limit_until = time.monotonic() + (ra if ra > 0 else 300.0)
+            # Wall-clock deadline so it expires across a sleep/suspend (see note
+            # at the _rate_limit_until definition).
+            _rate_limit_until = time.time() + (ra if ra > 0 else 300.0)
         raw = e.read().decode("utf-8", "replace") if e.fp else ""
         try:
             return e.code, json.loads(raw)
@@ -1064,12 +1070,27 @@ class OverlayWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         pad = PANEL_PAD
-        self.resize(PANEL_W + pad * 2, PANEL_H + pad * 2)
-        self.setMinimumSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
+        # Lock the size: a frameless/translucent window left merely resizable
+        # "expands" when dragged onto a monitor with a different DPI scale —
+        # Qt re-derives its physical size from the new scale factor. A fixed
+        # size keeps the overlay the same logical size across all screens.
+        self.setFixedSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
         self.show()
         _enable_acrylic(int(self.winId()))
+        # Re-assert size + acrylic whenever the window crosses to another
+        # screen. Per-monitor DPI changes otherwise leave stale geometry and
+        # drop the acrylic backdrop, which looked like the widget "breaking".
+        wh = self.windowHandle()
+        if wh is not None:
+            wh.screenChanged.connect(self._on_screen_changed)
         if sys.platform == "win32":
             QTimer.singleShot(0, self._win_apply_native_icon)
+
+    def _on_screen_changed(self, _screen):
+        pad = PANEL_PAD
+        self.setFixedSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
+        _enable_acrylic(int(self.winId()))
+        self.update()
 
     def _win_apply_native_icon(self):
         _win_set_hwnd_icons(int(self.winId()))
@@ -1734,6 +1755,15 @@ class OverlayWindow(QWidget):
 
 def main():
     _win_set_app_user_model_id()
+
+    # Pass fractional DPI scale factors through unrounded. The default policy
+    # rounds (e.g. 150% → snaps), which on a multi-monitor setup with mixed
+    # scaling made the overlay jump size when dragged between screens.
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except Exception:
+        pass
 
     if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)

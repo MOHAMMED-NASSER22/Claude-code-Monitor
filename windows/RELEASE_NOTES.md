@@ -1,4 +1,13 @@
-## Token Maxxing — Windows desktop overlay v1.1
+## Token Maxxing — Windows desktop overlay v1.2
+
+### What's new in v1.2
+
+- **Fixed multi-monitor scaling** — dragging the widget onto a screen with a
+  different DPI / aspect ratio no longer makes it expand, lose its glassy
+  background, or crash. The overlay now stays a fixed size across all displays.
+- **Fixed false "Rate limited" after sleep** — the rate-limit cooldown is now
+  tracked on the wall clock, so it expires while the PC sleeps. Waking the
+  machine no longer leaves the app stuck showing "Rate limited" until relaunch.
 
 Floating always-on-top widget that tracks your AI usage across **Claude** and **Cursor** in one cycling card:
 
