@@ -2,19 +2,15 @@
 
 ### What's new in v1.4
 
-- **Auto-start once per idle period** — overlay and ESP8266 firmware now set the
-  `sessionStarted` latch only after a successful anchor POST when the usage API still
-  reports idle, instead of retrying every poll or getting stuck forever.
-- **`token_bridge.py` rate limit after sleep** — bridge poller now uses wall-clock time
-  for 429 cooldowns (same fix as the overlay in v1.2), so sleep no longer leaves the
-  bridge backed off until restart.
+- **Auto-start once per idle period** — the overlay sets the `sessionStarted` latch
+  only after a successful anchor POST when the usage API still reports idle, instead
+  of retrying every poll or getting stuck forever.
 
 ### What's new in v1.3
 
 - **Fixed auto-start stuck on IDLE** — if auto-start sent the anchor message but the
   usage API still reported no active 5h block, a stale `sessionStarted` flag blocked
-  all retries. The overlay now clears that latch and retries until the SESSION clock
-  appears. Same fix on the ESP8266 desk gadget firmware.
+  all retries. The overlay now retries until the SESSION clock appears.
 
 ### What's new in v1.2
 
@@ -63,4 +59,5 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
   and pauses polling until the cooldown clears
 - Cursor token is read locally (`%APPDATA%\Cursor\…\state.vscdb`) and only sent to
   Cursor's own usage endpoint; if Cursor isn't installed, no Cursor card appears
-- Source: `windows/` in the repo
+- Source: `windows/` in the repo (self-contained; root `token_bridge.py` / firmware unchanged)
+- Optional `windows/token_bridge.py` includes the same rate-limit and poll fixes for LAN bridge users

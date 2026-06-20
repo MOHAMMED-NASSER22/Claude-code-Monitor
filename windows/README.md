@@ -1,8 +1,22 @@
 # Token Maxxing — Windows Desktop
 
-Self-contained Windows desktop app: a floating always-on-top widget showing Claude **SESSION (5h)** and **WEEKLY (7d)** usage (the same numbers as Claude Code `/usage` and the ESP8266 desk gadget) plus Cursor **Auto** and **API** pool usage.
+Self-contained Windows desktop app: a floating always-on-top widget showing Claude **SESSION (5h)** and **WEEKLY (7d)** usage plus Cursor **Auto** and **API** pool usage.
 
-This folder is **isolated from the firmware** (`claude_monitor/`, `token_bridge.py`, etc.). Nothing here is required for the ESP8266 build.
+Everything needed to build and run the `.exe` lives in this folder. The app does not import or depend on `token_bridge.py`, `claude_monitor/`, or any other repo path at runtime or build time.
+
+| File | Role |
+|------|------|
+| `claude_monitor_overlay.py` | Main app (PyQt6) |
+| `cursor_usage.py` | Optional Cursor Auto + API usage source |
+| `make_icon.py` | Generates `spark.ico` at build time |
+| `pyi_rth_appusermodelid.py` | PyInstaller runtime hook (taskbar icon) |
+| `build.bat` | One-file `.exe` build |
+| `requirements.txt` | Python dependencies |
+| `version_info.txt` | Windows PE version resource |
+| `token_bridge.py` | Optional LAN bridge (same credentials; overlay-aligned rate limits). Not required for the `.exe`. |
+| `reference/` | Firmware patch notes for ESP8266 parity — not bundled in the `.exe` |
+
+This folder is **isolated from the firmware** (`claude_monitor/`, `token_bridge.py`, etc.). Nothing here is required for the ESP8266 build, and changes here should not touch those paths.
 
 ## Requirements
 
@@ -56,7 +70,7 @@ You can also mint credentials with the repo’s `mint_token.sh` at the project r
 | Display name | `name` | from filename |
 | Auto-start 5h session when idle | `autoStartSession` | on |
 
-**Auto-start** matches the ESP8266 `AUTO_START_SESSION` behavior: when SESSION is idle, sends one minimal Haiku message (~22 tokens) to anchor a new 5h block.
+**Auto-start** matches the desk-gadget behavior conceptually: when SESSION is idle, sends one minimal Haiku message (~22 tokens) to anchor a new 5h block.
 
 **Sources** (global), stored in `%USERPROFILE%\.claude_usage_bridge\overlay_config.json`:
 
@@ -97,16 +111,20 @@ Cursor isn't installed, no extra card appears. The pool resets badge is `mo`
 
 UI layout mirrors `../simulator.html` and `../design-package/` (160×128 TFT design at 2× scale).
 
+## Optional: LAN bridge on Windows
+
+If you also run an ESP8266 desk gadget from this PC, use the copy in this folder
+(not the repo-root `token_bridge.py`):
+
+```powershell
+cd windows
+python token_bridge.py
+```
+
 ## Distribute
 
 `dist/` and `build/` are gitignored. Attach `TokenMaxxing.exe` to a [GitHub Release](https://github.com/aabdlwahab/Claude-code-Monitor/releases) — see issue #1.
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `claude_monitor_overlay.py` | Main app (PyQt6) |
-| `cursor_usage.py` | Optional Cursor Auto + API usage source |
-| `build.bat` | PyInstaller one-file build |
-| `requirements.txt` | Python dependencies |
-| `TokenMaxxing.spec` | PyInstaller spec (optional; `build.bat` uses CLI flags) |
+See the table at the top of this README. Optional: `TokenMaxxing.spec` (PyInstaller spec; `build.bat` uses CLI flags directly).

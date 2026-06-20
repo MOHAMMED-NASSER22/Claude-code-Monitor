@@ -754,13 +754,8 @@ bool fetchUsageManaged(JsonDocument& doc) {
       if (hasBlock) {
         tokenStore[i].sessionStarted = false;            // block exists -> rearm for next idle
       } else if (!tokenStore[i].sessionStarted && time(nullptr) > 1000000000L) {
-        if (startSession(tokenStore[i].accessToken.c_str())) {
-          fetchOneAccount(accts, tokenStore[i].accessToken.c_str(),
-                          tokenStore[i].label.c_str());
-          bool hasBlock2 = (bool)(accts[accts.size() - 1]["session"]["has_block"] | true);
-          if (!hasBlock2)
-            tokenStore[i].sessionStarted = true;         // POST ok, usage still idle — once per period
-        }
+        if (startSession(tokenStore[i].accessToken.c_str()))
+          tokenStore[i].sessionStarted = true;
       }
 #endif
     }

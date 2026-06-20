@@ -1,6 +1,14 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Claude usage bridge (OAuth-token edition, multi-account).
+
+Windows-maintained copy — lives under windows/ so the repo-root bridge and
+firmware can evolve independently for the ESP8266 hardware path. Run from here:
+
+  cd windows && python token_bridge.py
+
+Includes overlay-aligned fixes: 120s poll interval, HTTP 429 Retry-After backoff
+(wall-clock deadline so sleep does not extend the cooldown).
 
 Replaces the old browser-scrape bridge (bridge.py). Instead of driving real
 Chrome sessions through Cloudflare to read claude.ai's same-origin API, this:
@@ -51,7 +59,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Config (override via environment variables)
 # ---------------------------------------------------------------------------
 PORT         = int(os.environ.get("PORT", "8088"))
-POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))         # how often to re-read usage
+POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "120"))        # how often to re-read usage
+                                                                 # (2 min; ~6 req/300s budget,
+                                                                 #  60s sat on the 429 edge)
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
 # Force an exact set of credential files (os.pathsep-separated). If unset, every
 # CRED_DIR/credentials*.json is used -- so ./mint_token.sh <name> just works.
@@ -127,6 +137,15 @@ def _lock_for(path):
 # ---------------------------------------------------------------------------
 _SSL_CTX = ssl.create_default_context()
 
+# Set from a 429's Retry-After header; the poller backs off until then.
+# Tracked on the wall clock (time.time()), not time.monotonic(): on Windows the
+# monotonic clock freezes while the PC sleeps, so a cooldown set before sleep
+# would survive a multi-hour suspend and keep the poller backed off on wake.
+_rate_limit_until = 0.0          # time.time() (wall-clock) deadline
+
+def _rate_limited_remaining():
+    return max(0.0, _rate_limit_until - time.time())
+
 def _http_json(method, url, headers=None, body=None, form=None, timeout=25):
     """Return (status_code, parsed_json_or_text). Never raises on HTTP errors.
     body -> JSON-encoded; form -> application/x-www-form-urlencoded."""
@@ -150,6 +169,16 @@ def _http_json(method, url, headers=None, body=None, form=None, timeout=25):
             except ValueError:
                 return r.status, raw
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            global _rate_limit_until
+            try:
+                ra = float(e.headers.get("Retry-After", "") or 0)
+            except (TypeError, ValueError):
+                ra = 0.0
+            # Server sends Retry-After: ~299s. Fall back to 300s if absent.
+            # Wall-clock deadline so it expires across a sleep/suspend (see note
+            # at the _rate_limit_until definition).
+            _rate_limit_until = time.time() + (ra if ra > 0 else 300.0)
         raw = e.read().decode("utf-8", "replace") if e.fp else ""
         try:
             return e.code, json.loads(raw)
@@ -357,7 +386,11 @@ def poll_loop():
         else:
             print("[bridge] no credentials yet -- run ./mint_token.sh", file=sys.stderr)
         first = False
-        _shutdown.wait(POLL_SECONDS)
+        # If a 429 set a cooldown, wait it out instead of the normal interval.
+        cooldown = _rate_limited_remaining()
+        if cooldown > 0:
+            print(f"[bridge] rate limited -- backing off {int(cooldown)}s", flush=True)
+        _shutdown.wait(max(POLL_SECONDS, cooldown))
 
 # ---------------------------------------------------------------------------
 # HTTP server
