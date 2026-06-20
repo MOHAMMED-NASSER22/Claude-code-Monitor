@@ -566,9 +566,12 @@ def _fetch_claude_accounts() -> list[dict]:
             if active:
                 if cfg["session_started"]:
                     _save_account_settings(path, session_started=False)
-            elif cfg["auto_start"] and not cfg["session_started"]:
+            elif cfg["auto_start"]:
+                # Clear stale latch from older builds that set sessionStarted on POST
+                # 200 even when the usage API still reported no block.
+                if cfg["session_started"]:
+                    _save_account_settings(path, session_started=False)
                 if _start_session(token):
-                    _save_account_settings(path, session_started=True)
                     status, resp = _http_json("GET", USAGE_URL, headers=headers)
                     if status == 200 and isinstance(resp, dict):
                         fh = resp.get("five_hour") or {}

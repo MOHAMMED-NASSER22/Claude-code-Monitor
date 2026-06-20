@@ -1,4 +1,11 @@
-## Token Maxxing — Windows desktop overlay v1.2
+## Token Maxxing — Windows desktop overlay v1.3
+
+### What's new in v1.3
+
+- **Fixed auto-start stuck on IDLE** — if auto-start sent the anchor message but the
+  usage API still reported no active 5h block, a stale `sessionStarted` flag blocked
+  all retries. The overlay now clears that latch and retries until the SESSION clock
+  appears. Same fix on the ESP8266 desk gadget firmware.
 
 ### What's new in v1.2
 

@@ -753,9 +753,14 @@ bool fetchUsageManaged(JsonDocument& doc) {
       bool hasBlock = (bool)(accts[accts.size() - 1]["session"]["has_block"] | true);
       if (hasBlock) {
         tokenStore[i].sessionStarted = false;            // block exists -> rearm for next idle
-      } else if (!tokenStore[i].sessionStarted && time(nullptr) > 1000000000L) {
-        if (startSession(tokenStore[i].accessToken.c_str()))
-          tokenStore[i].sessionStarted = true;
+      } else {
+        if (tokenStore[i].sessionStarted)                // stale latch — allow retry
+          tokenStore[i].sessionStarted = false;
+        if (time(nullptr) > 1000000000L
+            && startSession(tokenStore[i].accessToken.c_str())) {
+          fetchOneAccount(accts, tokenStore[i].accessToken.c_str(),
+                          tokenStore[i].label.c_str());  // refresh card; retry next poll if still idle
+        }
       }
 #endif
     }
