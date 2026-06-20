@@ -130,10 +130,13 @@ def _lock_for(path):
 _SSL_CTX = ssl.create_default_context()
 
 # Set from a 429's Retry-After header; the poller backs off until then.
-_rate_limit_until = 0.0          # time.monotonic() value
+# Tracked on the wall clock (time.time()), not time.monotonic(): on Windows the
+# monotonic clock freezes while the PC sleeps, so a cooldown set before sleep
+# would survive a multi-hour suspend and keep the poller backed off on wake.
+_rate_limit_until = 0.0          # time.time() (wall-clock) deadline
 
 def _rate_limited_remaining():
-    return max(0.0, _rate_limit_until - time.monotonic())
+    return max(0.0, _rate_limit_until - time.time())
 
 def _http_json(method, url, headers=None, body=None, form=None, timeout=25):
     """Return (status_code, parsed_json_or_text). Never raises on HTTP errors.
@@ -165,7 +168,9 @@ def _http_json(method, url, headers=None, body=None, form=None, timeout=25):
             except (TypeError, ValueError):
                 ra = 0.0
             # Server sends Retry-After: ~299s. Fall back to 300s if absent.
-            _rate_limit_until = time.monotonic() + (ra if ra > 0 else 300.0)
+            # Wall-clock deadline so it expires across a sleep/suspend (see note
+            # at the _rate_limit_until definition).
+            _rate_limit_until = time.time() + (ra if ra > 0 else 300.0)
         raw = e.read().decode("utf-8", "replace") if e.fp else ""
         try:
             return e.code, json.loads(raw)

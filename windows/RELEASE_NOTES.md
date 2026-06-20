@@ -1,4 +1,13 @@
-## Token Maxxing — Windows desktop overlay v1.3
+## Token Maxxing — Windows desktop overlay v1.4
+
+### What's new in v1.4
+
+- **Auto-start once per idle period** — overlay and ESP8266 firmware now set the
+  `sessionStarted` latch only after a successful anchor POST when the usage API still
+  reports idle, instead of retrying every poll or getting stuck forever.
+- **`token_bridge.py` rate limit after sleep** — bridge poller now uses wall-clock time
+  for 429 cooldowns (same fix as the overlay in v1.2), so sleep no longer leaves the
+  bridge backed off until restart.
 
 ### What's new in v1.3
 
