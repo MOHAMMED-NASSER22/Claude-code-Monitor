@@ -1,4 +1,21 @@
-## Token Maxxing — Windows desktop overlay v1.4
+## Token Maxxing — Windows desktop overlay v1.5
+
+### What's new in v1.5
+
+- **Minimize to clock** — right-click the overlay and choose **Minimize to clock**
+  to collapse it into a one-line strip on the taskbar, just left of the system
+  clock (TrafficMonitor / NetSpeed style). Shows `S 38%  W 62%` for Claude or
+  `A` / `P` for Cursor Auto / API, plus the spark or cube. Double-click or
+  **Expand** restores the full widget. The mode is remembered across launches.
+- **Resize the overlay** — right-click → **Size** (100–300%), or **Ctrl+scroll**
+  on the full widget. Size is remembered. Mini mode stays taskbar-height.
+- **Update check** — from v1.5 the overlay checks GitHub every 6 hours (and shortly
+  after launch). If a newer release is published, a small bar appears:
+  **Update 1.x · click to download**. ✕ dismisses that version. Mini mode shows
+  a blue tick on the left; right-click → **Get v1.x** opens the release.
+- **First-run tutorial** — after sign-in (and for existing installs until skipped),
+  a short in-widget tour. Scroll to fade and Ctrl+scroll to resize come first
+  (try them on those screens). Right-click → **Show tutorial** to replay.
 
 ### What's new in v1.4
 
@@ -40,11 +57,12 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
 
 ### Controls
 
-- **Drag** to move
+- **Drag** to move (full overlay)
 - **Left-click** to cycle accounts
 - **Scroll wheel** → opacity
-- **Double-click** → reset opacity
-- **Right-click** → refresh, settings, re-auth, exit
+- **Ctrl+scroll** → resize full overlay (100–300%)
+- **Double-click** → reset opacity (full) or expand (mini)
+- **Right-click** → minimize to clock / expand, size, tutorial, refresh, settings, re-auth, exit
 
 ### Settings (right-click → ⚙)
 

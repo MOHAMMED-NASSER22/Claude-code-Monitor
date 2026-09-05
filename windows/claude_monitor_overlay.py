@@ -16,8 +16,11 @@ Usage:
   - Drag anywhere on the widget to move it
   - Left-click (no drag) to cycle through accounts
   - Scroll wheel to change transparency
-  - Double-click to reset transparency
-  - Right-click for context menu (refresh, settings, re-auth, opacity, exit)
+  - Ctrl+scroll to resize the full overlay (remembered)
+  - Double-click to reset transparency (or expand from mini mode)
+  - Right-click for context menu (minimize to clock, size, tutorial, refresh, settings, re-auth, opacity, exit)
+  - First launch (or until skipped) shows a short in-widget tutorial; replay from the menu
+  - Auto-checks GitHub for newer releases (from v1.5) and shows a small update bar
 """
 
 import sys
@@ -47,7 +50,7 @@ from PyQt6.QtWidgets import (
 import math
 
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QRectF,
+    Qt, QTimer, QThread, pyqtSignal, QPoint, QPointF, QRect, QRectF,
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QPen, QLinearGradient,
@@ -131,6 +134,207 @@ def _win_set_app_user_model_id() -> None:
     except Exception:
         pass
 
+
+# ── Taskbar / clock docking (mini mode) ───────────────────────────────────────
+
+def _win_tray_windows():
+    """(tray_hwnd, notify_hwnd) for Shell_TrayWnd / TrayNotifyWnd, or (0, 0)."""
+    if sys.platform != "win32":
+        return 0, 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        FindWindowW = user32.FindWindowW
+        FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        FindWindowW.restype = wintypes.HWND
+        FindWindowExW = user32.FindWindowExW
+        FindWindowExW.argtypes = [
+            wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+        FindWindowExW.restype = wintypes.HWND
+        tray = FindWindowW("Shell_TrayWnd", None)
+        if not tray:
+            return 0, 0
+        notify = FindWindowExW(tray, None, "TrayNotifyWnd", None)
+        return int(tray or 0), int(notify or 0)
+    except Exception:
+        return 0, 0
+
+
+def _win_window_rect(hwnd: int):
+    """Native virtual-desktop rect (left, top, right, bottom) or None."""
+    if not hwnd:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        GetWindowRect = user32.GetWindowRect
+        GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        GetWindowRect.restype = wintypes.BOOL
+        rect = wintypes.RECT()
+        if not GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+    except Exception:
+        return None
+
+
+def _win_monitor_rect(hwnd: int):
+    """Native rcMonitor for the screen that owns hwnd, or None."""
+    if not hwnd:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        MONITOR_DEFAULTTONEAREST = 2
+        MonitorFromWindow = user32.MonitorFromWindow
+        MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        MonitorFromWindow.restype = ctypes.c_void_p
+        GetMonitorInfoW = user32.GetMonitorInfoW
+        GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+        GetMonitorInfoW.restype = wintypes.BOOL
+        hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if not hmon:
+            return None
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return None
+        r = mi.rcMonitor
+        return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+    except Exception:
+        return None
+
+
+def _qscreen_for_native_rect(nleft, ntop, nright, nbottom):
+    """QScreen whose monitor contains this native rect's center."""
+    cx = (nleft + nright) // 2
+    cy = (ntop + nbottom) // 2
+    best = None
+    best_dpr_match = None
+    nw = max(1, nright - nleft)
+    nh = max(1, nbottom - ntop)
+    for screen in QGuiApplication.screens():
+        g = screen.geometry()
+        dpr = screen.devicePixelRatio() or 1.0
+        # Native extent of this screen, assuming geometry is logical DIPs.
+        ng_w, ng_h = g.width() * dpr, g.height() * dpr
+        ng_x, ng_y = g.x() * dpr, g.y() * dpr
+        if (ng_x - 4 <= cx <= ng_x + ng_w + 4
+                and ng_y - 4 <= cy <= ng_y + ng_h + 4):
+            return screen
+        # Direct native match (Qt 6 Windows window coords are often native).
+        if (g.x() - 4 <= cx <= g.x() + g.width() + 4
+                and g.y() - 4 <= cy <= g.y() + g.height() + 4):
+            best = screen
+        if abs(ng_w - nw) < 8 and abs(ng_h - nh) < 8:
+            best_dpr_match = screen
+    return (best
+            or best_dpr_match
+            or QGuiApplication.screenAt(QPoint(cx, cy))
+            or QGuiApplication.primaryScreen())
+
+
+def _map_native_to_qt(nx, ny, screen, nmon) -> tuple[int, int]:
+    """Map a native virtual-desktop point into Qt widget coordinates."""
+    g = screen.geometry()
+    if nmon:
+        nl, nt, nr, nb = nmon
+        nw, nh = nr - nl, nb - nt
+        if nw > 0 and nh > 0:
+            qx = g.x() + (nx - nl) * g.width() / nw
+            qy = g.y() + (ny - nt) * g.height() / nh
+            return int(round(qx)), int(round(qy))
+    dpr = screen.devicePixelRatio() or 1.0
+    return int(round(nx / dpr)), int(round(ny / dpr))
+
+
+def _mini_dock_rect() -> QRect | None:
+    """Qt-coordinate rect for the mini strip, left of the clock/tray cluster."""
+    tray_hwnd, notify_hwnd = _win_tray_windows()
+    tray = _win_window_rect(tray_hwnd) if tray_hwnd else None
+    notify = _win_window_rect(notify_hwnd) if notify_hwnd else None
+    nmon = _win_monitor_rect(tray_hwnd) if tray_hwnd else None
+
+    if tray and notify:
+        screen = _qscreen_for_native_rect(*tray)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        tl, tt, tr, tb = tray
+        nl, nt, nr, nb = notify
+        tray_w, tray_h = tr - tl, tb - tt
+        horizontal = tray_w >= tray_h
+        q_left, q_top = _map_native_to_qt(tl, tt, screen, nmon)
+        q_right, q_bottom = _map_native_to_qt(tr, tb, screen, nmon)
+        n_left, n_top = _map_native_to_qt(nl, nt, screen, nmon)
+        n_right, n_bot = _map_native_to_qt(nr, nb, screen, nmon)
+        q_tray = QRect(q_left, q_top, max(1, q_right - q_left),
+                       max(1, q_bottom - q_top))
+        w = MINI_W
+        if horizontal:
+            h = q_tray.height()
+            # Sit immediately left of the tray/clock cluster (Win11 has no
+            # TrayClockWClass — TrayNotifyWnd is the clock + notification area).
+            x = n_left - w
+            if q_tray.center().x() < (screen.geometry().center().x()):
+                # Taskbar on the top or bottom but tray cluster on the left
+                # (RTL / unusual) — sit to the right of the cluster instead.
+                x = n_right
+            # Clamp onto the taskbar strip.
+            x = max(q_tray.x(), min(x, q_tray.x() + q_tray.width() - w))
+            y = q_tray.y()
+        else:
+            # Vertical taskbar: sit just above the clock cluster, same width as bar.
+            w = q_tray.width()
+            h = 28
+            x = q_tray.x()
+            y = n_top - h
+            if y < q_tray.y():
+                y = n_bot
+            y = max(q_tray.y(), min(y, q_tray.y() + q_tray.height() - h))
+        return QRect(x, y, max(48, w), max(22, h))
+
+    # Fallback: sit on the excluded taskbar strip at the clock corner.
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return None
+    full = screen.geometry()
+    avail = screen.availableGeometry()
+    left = avail.x() - full.x()
+    right = (full.x() + full.width()) - (avail.x() + avail.width())
+    top = avail.y() - full.y()
+    bottom = (full.y() + full.height()) - (avail.y() + avail.height())
+    w = MINI_W
+    if bottom > 2:
+        h = max(24, bottom)
+        return QRect(full.x() + full.width() - w, avail.y() + avail.height(), w, h)
+    if top > 2:
+        h = max(24, top)
+        return QRect(full.x() + full.width() - w, full.y(), w, h)
+    if right > 2:
+        h = 28
+        return QRect(avail.x() + avail.width(),
+                     full.y() + full.height() - h, right, h)
+    if left > 2:
+        h = 28
+        return QRect(full.x(), full.y() + full.height() - h, left, h)
+    # No taskbar exclusion (auto-hide): park at the bottom-right of the screen.
+    h = 32
+    return QRect(full.x() + full.width() - w, full.y() + full.height() - h, w, h)
+
 # ── OAuth / API constants (extracted from the Claude Code binary) ────────────
 # All values below were extracted from the shipping Claude Code binary's OAuth
 # config object (the `--claudeai` subscription flow), not guessed.
@@ -151,6 +355,10 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
+APP_VERSION  = "1.5"            # keep in sync with windows/version_info.txt
+GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
+UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
+UPDATE_BANNER_H = 26
 POLL_MS      = 120 * 1000       # 2 min. Budget is ~6 req/300s window (server enforces a
                                 # 300s cooldown via Retry-After on 429); 60s sat on the
                                 # edge and tripped 429 once manual refreshes piled on.
@@ -183,11 +391,27 @@ C_GREEN   = QColor( 40, 188,  80)        # GREEN  (#28BC50)
 C_YELLOW  = QColor(248, 204,   0)        # YELLOW (#F8CC00)
 C_RED     = QColor(248,  52,  48)        # RED    (#F83430)
 
-SCALE     = 2                              # 160×128 TFT coords → desktop pixels
-PANEL_W   = 160 * SCALE
-PANEL_H   = 128 * SCALE
+SCALE_DEFAULT = 2.0                        # 160×128 TFT coords → desktop pixels
+SCALE_MIN     = 1.0
+SCALE_MAX     = 3.0
+SCALE_STEP    = 0.25
+SCALE     = SCALE_DEFAULT
+PANEL_W   = int(160 * SCALE)
+PANEL_H   = int(128 * SCALE)
 PANEL_PAD = 8                              # glassy margin around the dashboard
                                            # (small → content fills to the edges)
+MINI_W    = 160                            # logical width of the taskbar strip
+DOCK_MS   = 1000                           # re-dock while the taskbar moves / auto-hides
+
+
+def _clamp_scale(value) -> float:
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        scale = SCALE_DEFAULT
+    steps = round(scale / SCALE_STEP)
+    scale = steps * SCALE_STEP
+    return max(SCALE_MIN, min(SCALE_MAX, scale))
 
 
 def _pct_color(pct: int) -> QColor:
@@ -321,7 +545,11 @@ def _save_account_settings(path: str, *, name: str | None = None,
 # ── App-level config (source toggles + Cursor name) ─────────────────────────
 # Stored separately from credential files since Cursor has no file we own.
 APP_CONFIG_PATH = os.path.join(CRED_DIR, "overlay_config.json")
-_APP_CONFIG_DEFAULTS = {"show_claude": True, "show_cursor": True, "cursor_name": ""}
+_APP_CONFIG_DEFAULTS = {
+    "show_claude": True, "show_cursor": True, "cursor_name": "",
+    "compact_mode": False, "overlay_scale": SCALE_DEFAULT,
+    "dismissed_update": "", "tutorial_done": False,
+}
 
 
 def load_app_config() -> dict:
@@ -338,12 +566,20 @@ def load_app_config() -> dict:
     cfg["show_claude"] = bool(cfg["show_claude"])
     cfg["show_cursor"] = bool(cfg["show_cursor"])
     cfg["cursor_name"] = (str(cfg.get("cursor_name") or "")).strip()[:40]
+    cfg["compact_mode"] = bool(cfg.get("compact_mode", False))
+    cfg["overlay_scale"] = _clamp_scale(cfg.get("overlay_scale", SCALE_DEFAULT))
+    cfg["dismissed_update"] = str(cfg.get("dismissed_update") or "").strip()
+    cfg["tutorial_done"] = bool(cfg.get("tutorial_done", False))
     return cfg
 
 
 def save_app_config(*, show_claude: bool | None = None,
                     show_cursor: bool | None = None,
-                    cursor_name: str | None = None) -> None:
+                    cursor_name: str | None = None,
+                    compact_mode: bool | None = None,
+                    overlay_scale: float | None = None,
+                    dismissed_update: str | None = None,
+                    tutorial_done: bool | None = None) -> None:
     cfg = load_app_config()
     if show_claude is not None:
         cfg["show_claude"] = bool(show_claude)
@@ -351,6 +587,14 @@ def save_app_config(*, show_claude: bool | None = None,
         cfg["show_cursor"] = bool(show_cursor)
     if cursor_name is not None:
         cfg["cursor_name"] = cursor_name.strip()[:40]
+    if compact_mode is not None:
+        cfg["compact_mode"] = bool(compact_mode)
+    if overlay_scale is not None:
+        cfg["overlay_scale"] = _clamp_scale(overlay_scale)
+    if dismissed_update is not None:
+        cfg["dismissed_update"] = str(dismissed_update).strip()
+    if tutorial_done is not None:
+        cfg["tutorial_done"] = bool(tutorial_done)
     try:
         os.makedirs(CRED_DIR, exist_ok=True)
         tmp = APP_CONFIG_PATH + ".tmp"
@@ -369,6 +613,44 @@ def _account_label(path: str, idx: int) -> str:
     if m:
         return m.group(1).replace("-", " ").replace("_", " ").title()
     return f"Account {idx + 1}"
+
+
+def _parse_version(text: str) -> tuple[int, int] | None:
+    """Major.minor from tags like v1.5-overlay or titles like Token Maxxing v1.5."""
+    m = re.search(r"v?(\d+)\.(\d+)", str(text or ""), re.I)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _version_label(ver: tuple[int, int]) -> str:
+    return f"{ver[0]}.{ver[1]}"
+
+
+def fetch_latest_release() -> dict | None:
+    """Latest GitHub Release on the fork, or None on any failure."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    headers = {
+        "User-Agent": f"TokenMaxxing/{APP_VERSION}",
+        "Accept": "application/vnd.github+json",
+    }
+    status, resp = _http_json("GET", url, headers=headers, timeout=12,
+                              honor_retry_after=False)
+    if status != 200 or not isinstance(resp, dict):
+        return None
+    tag = str(resp.get("tag_name") or "")
+    name = str(resp.get("name") or "")
+    ver = _parse_version(tag) or _parse_version(name)
+    if not ver:
+        return None
+    html = (str(resp.get("html_url") or "").strip()
+            or f"https://github.com/{GITHUB_REPO}/releases/latest")
+    return {
+        "tuple":   ver,
+        "version": _version_label(ver),
+        "url":     html,
+        "tag":     tag,
+    }
 
 
 def _start_session(token: str) -> bool:
@@ -390,7 +672,8 @@ def _start_session(token: str) -> bool:
 
 def _http_json(method: str, url: str, headers: dict | None = None,
                body: dict | None = None, form: dict | None = None,
-               timeout: int = 20) -> tuple[int, dict | str]:
+               timeout: int = 20, honor_retry_after: bool = True
+               ) -> tuple[int, dict | str]:
     hdrs = {"User-Agent": "claude-overlay/1.0", "Accept": "application/json"}
     if form is not None:
         data = urllib.parse.urlencode(form).encode()
@@ -411,7 +694,7 @@ def _http_json(method: str, url: str, headers: dict | None = None,
             except ValueError:
                 return r.status, raw
     except urllib.error.HTTPError as e:
-        if e.code == 429:
+        if e.code == 429 and honor_retry_after:
             global _rate_limit_until
             try:
                 ra = float(e.headers.get("Retry-After", "") or 0)
@@ -761,10 +1044,15 @@ def _cube_shade(shade: float, ok: bool) -> QColor:
     return QColor(int(r * shade), int(gc * shade), int(b * shade))
 
 
-def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float) -> None:
-    """Cursor's cube logo, spinning about its vertical axis (Claude's spark analog)."""
+def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float, size: float = 3.9) -> None:
+    """Cursor's cube logo, spinning about its vertical axis (Claude's spark analog).
+
+    `size` is the cube half-extent in pixels (dashboard default 3.9). After the
+    isometric tilt, the on-screen radius is about 1.75×size — pass a smaller
+    size from the mini strip so the cube matches the Claude spark.
+    """
     breathe = 0.92 + 0.08 * math.sin(t * 1.6)
-    s = 3.9 * breathe
+    s = size * breathe
     a = t * 0.9                       # spin
     tilt = 0.60                       # fixed pitch so the lit top face shows
     ca, sa = math.cos(a), math.sin(a)
@@ -890,10 +1178,102 @@ def _draw_boot(g: Gfx, status: str, t: float) -> None:
     g.text(status, (160 - stw) // 2, 114, C_RED if err else C_DIM, 1)
 
 
-class DashboardCanvas(QWidget):
-    """Renders drawDashboard / drawBoot from simulator.html at SCALE×."""
+def _draw_mini(p: QPainter, d: dict, t: float, w: int, h: int) -> None:
+    """One-line taskbar strip: S 38%  W 62% (or A / P) plus spark/cube.
 
-    def __init__(self, parent=None):
+    Columns are fixed (label + '100%' + logo slot) so Claude ↔ Cursor and
+    9% ↔ 100% don't shift the layout.
+    """
+    s, wk = d.get("session") or {}, d.get("weekly") or {}
+    ok = d.get("ok", True)
+    cursor = d.get("kind") == "cursor"
+    idle = not s.get("active", True)
+    s_pct = s.get("pct", 0)
+    w_pct = wk.get("pct", 0)
+    s_lab, w_lab = ("A", "P") if cursor else ("S", "W")
+
+    def col_for(pct, is_idle=False):
+        if not ok:
+            return C_DIM
+        if is_idle:
+            return C_DIM
+        return _pct_color(int(pct))
+
+    def txt(pct, is_idle):
+        if is_idle:
+            return "--"
+        try:
+            return str(max(0, min(100, int(pct))))
+        except (TypeError, ValueError):
+            return "--"
+
+    s_txt = txt(s_pct, idle)
+    w_txt = txt(w_pct, False)
+    s_col = col_for(s_pct, idle)
+    w_col = col_for(w_pct, False)
+    lab_col = C_DIM if ok else C_RED
+
+    font_px = max(10, min(14, h - 10))
+    f = QFont("Segoe UI")
+    f.setPixelSize(font_px)
+    f.setWeight(QFont.Weight.DemiBold)
+    p.setFont(f)
+    fm = QFontMetrics(f)
+
+    pad_l = 12 if d.get("update") else 8
+    pad_r = 6
+    pair_gap = 10
+    logo_gap = 8
+    label_gap = 4
+    label_w = max(fm.horizontalAdvance(c) for c in "SWAP")
+    value_w = fm.horizontalAdvance("100%")
+    pair_w = label_w + label_gap + value_w
+    logo_slot = max(16, min(20, h - 8))
+
+    x = pad_l
+    text_h = h
+    align_l = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    align_r = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+    def draw_pair(label, value, vcol):
+        nonlocal x
+        p.setPen(lab_col)
+        p.drawText(QRect(x, 0, label_w, text_h), align_l, label)
+        vx = x + label_w + label_gap
+        p.setPen(vcol)
+        shown = value if value == "--" else f"{value}%"
+        p.drawText(QRect(vx, 0, value_w, text_h), align_r, shown)
+        x += pair_w
+
+    draw_pair(s_lab, s_txt, s_col)
+    x += pair_gap
+    draw_pair(w_lab, w_txt, w_col)
+
+    if d.get("update"):
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C_ACCENT)
+        p.drawRoundedRect(QRectF(2, 5, 3, max(8, h - 10)), 1.5, 1.5)
+
+    cx = x + logo_gap + logo_slot / 2
+    cy = h / 2
+    # Same occupied radius for spark rays and the solid cube.
+    logo_r = logo_slot * 0.46
+    g = Gfx(p)
+    if cursor:
+        # Projected cube radius ≈ 1.75×half-extent; match spark outer radius.
+        _draw_cursor_mark(g, cx, cy, ok, t, size=logo_r / 1.75)
+    else:
+        blip = ok and (int(time.time() * 1000) % 5000) < 450
+        spark_col = C_CLAUDE if ok else C_RED
+        _draw_spark(g, cx, cy, t, logo_r if blip else logo_r * 0.92,
+                    max(1.5, logo_r * 0.32), 6, spark_col,
+                    C_TEXT if blip else spark_col)
+
+
+class DashboardCanvas(QWidget):
+    """Renders drawDashboard / drawBoot from simulator.html at the chosen scale."""
+
+    def __init__(self, parent=None, scale: float = SCALE_DEFAULT):
         super().__init__(parent)
         self._mode = "boot"
         self._boot_status = "Fetching usage..."
@@ -902,10 +1282,16 @@ class DashboardCanvas(QWidget):
         self._poll_interval = POLL_MS / 1000.0
         self._last_fetch_at: float | None = None
         self._fetching = False
-        self.setFixedSize(PANEL_W, PANEL_H)
+        self._scale = SCALE_DEFAULT
+        self.set_scale(scale)
         tm = QTimer(self)
         tm.timeout.connect(self._tick)
         tm.start(33)
+
+    def set_scale(self, scale: float) -> None:
+        self._scale = _clamp_scale(scale)
+        self.setFixedSize(round(160 * self._scale), round(128 * self._scale))
+        self.update()
 
     def set_boot(self, status: str) -> None:
         self._mode = "boot"
@@ -941,7 +1327,7 @@ class DashboardCanvas(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), C_PANEL)
         p.save()
-        p.scale(SCALE, SCALE)
+        p.scale(self._scale, self._scale)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
         g = Gfx(p)
         if self._mode == "boot":
@@ -985,6 +1371,61 @@ class PulseDot(QWidget):
         p.drawEllipse(QPointF(cx, cy), r + 2, r + 2)
         p.setBrush(self._color)
         p.drawEllipse(QPointF(cx, cy), r, r)
+
+
+class UpdateBanner(QWidget):
+    """Thin bar at the bottom of the full overlay: new GitHub release available."""
+
+    open_clicked = pyqtSignal()
+    dismiss_clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(UPDATE_BANNER_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 0, 4, 0)
+        lay.setSpacing(4)
+
+        self._label = QLabel("Update available")
+        self._label.setStyleSheet(
+            "color: #00A8F8; font-size: 10px; font-weight: 700; "
+            "background: transparent;")
+        lay.addWidget(self._label, 1)
+
+        self._x = QPushButton("✕")
+        self._x.setFixedSize(22, 22)
+        self._x.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._x.setToolTip("Dismiss this version")
+        self._x.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #808098;
+                border: none; font-size: 10px; font-weight: 700;
+            }
+            QPushButton:hover { color: #EBEBF0; }
+        """)
+        self._x.clicked.connect(self.dismiss_clicked.emit)
+        lay.addWidget(self._x)
+
+    def set_version(self, version: str) -> None:
+        self._label.setText(f"Update {version}  ·  click to download")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            child = self.childAt(e.position().toPoint())
+            if child is not self._x:
+                self.open_clicked.emit()
+                e.accept()
+                return
+        super().mousePressEvent(e)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setPen(QPen(C_BORDER, 1.0))
+        y = 0.5
+        p.drawLine(QPointF(10, y), QPointF(self.width() - 10, y))
 
 
 # ── Threads ───────────────────────────────────────────────────────────────────
@@ -1031,6 +1472,16 @@ class AuthThread(QThread):
             self.done.emit(False, str(e))
 
 
+class UpdateCheckThread(QThread):
+    done = pyqtSignal(object)   # dict | None
+
+    def run(self):
+        try:
+            self.done.emit(fetch_latest_release())
+        except Exception:
+            self.done.emit(None)
+
+
 # ── Main overlay window ───────────────────────────────────────────────────────
 
 class OverlayWindow(QWidget):
@@ -1048,20 +1499,134 @@ class OverlayWindow(QWidget):
         self._manual_refresh_at: list[float] = []
         self._refresh_notice: str           = ""
         self._refresh_notice_until: float   = 0.0
+        self._compact:      bool            = False
+        self._full_pos:     QPoint | None   = None
+        self._scale:        float           = _clamp_scale(
+            load_app_config()["overlay_scale"])
+        self._update_info:  dict | None     = None
+        self._update_checking: bool         = False
+        self._tut_step:     int             = 0
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._cycle_from_click)
 
         self._init_window()
         self._build_ui()
+        self._start_update_checks()
 
         if _cred_files():
             self._show_main()
         else:
             self._show_auth()
 
+    def _full_size(self) -> tuple[int, int]:
+        pad = PANEL_PAD
+        scale = getattr(self, "_scale", SCALE_DEFAULT)
+        h = round(128 * scale) + pad * 2
+        if (not self._compact
+                and getattr(self, "_update_banner", None) is not None
+                and self._update_banner.isVisible()):
+            h += UPDATE_BANNER_H
+        return round(160 * scale) + pad * 2, h
+
+    def _apply_full_size(self) -> None:
+        if self._compact:
+            return
+        fw, fh = self._full_size()
+        self.setFixedSize(fw, fh)
+
+    def _set_scale(self, scale: float, persist: bool = True) -> None:
+        scale = _clamp_scale(scale)
+        self._scale = scale
+        if persist:
+            save_app_config(overlay_scale=scale)
+        if hasattr(self, "_canvas"):
+            self._canvas.set_scale(scale)
+        self._apply_full_size()
+        self._refresh_tutorial_readout()
+        self.update()
+
+    def setWindowOpacity(self, level):
+        super().setWindowOpacity(level)
+        self._refresh_tutorial_readout()
+
+    def _apply_chrome(self, compact: bool) -> None:
+        flags = (Qt.WindowType.FramelessWindowHint |
+                 Qt.WindowType.WindowStaysOnTopHint)
+        flags |= Qt.WindowType.Tool if compact else Qt.WindowType.Window
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.show()
+        _enable_acrylic(int(self.winId()))
+        wh = self.windowHandle()
+        if wh is not None:
+            try:
+                wh.screenChanged.disconnect(self._on_screen_changed)
+            except TypeError:
+                pass
+            wh.screenChanged.connect(self._on_screen_changed)
+        QTimer.singleShot(0, self._win_apply_native_icon)
+
+    def _ensure_dock_timers(self) -> None:
+        if not hasattr(self, "_dock_timer"):
+            self._dock_timer = QTimer(self)
+            self._dock_timer.timeout.connect(self._dock_mini)
+            self._mini_tick = QTimer(self)
+            self._mini_tick.timeout.connect(self.update)
+
+    def _enter_mini(self, persist: bool = True) -> None:
+        if self._stack.currentIndex() != 0:
+            return
+        if persist:
+            save_app_config(compact_mode=True)
+        if self._compact:
+            self._dock_mini()
+            return
+        self._full_pos = self.pos()
+        self._compact = True
+        self._update_banner.hide()
+        self._stack.hide()
+        self._apply_chrome(compact=True)
+        self._ensure_dock_timers()
+        self._dock_timer.start(DOCK_MS)
+        self._mini_tick.start(33)
+        self._dock_mini()
+        self.update()
+
+    def _enter_full(self, persist: bool = True) -> None:
+        if persist:
+            save_app_config(compact_mode=False)
+        if not self._compact:
+            return
+        self._compact = False
+        if hasattr(self, "_dock_timer"):
+            self._dock_timer.stop()
+            self._mini_tick.stop()
+        self._stack.show()
+        self._apply_chrome(compact=False)
+        if self._update_info:
+            self._update_banner.show()
+        self._apply_full_size()
+        if self._full_pos is not None:
+            self.move(self._full_pos)
+        self.update()
+
+    def _dock_mini(self) -> None:
+        if not self._compact:
+            return
+        rect = _mini_dock_rect()
+        if rect is None or not rect.isValid():
+            self.setFixedSize(MINI_W, 32)
+            return
+        self.setFixedSize(rect.width(), rect.height())
+        self.move(rect.topLeft())
+
     def _init_window(self):
         # FramelessWindowHint + StaysOnTop keeps the floating overlay look.
         # We intentionally do NOT use Qt.WindowType.Tool here: a Tool window is
         # hidden from the Windows taskbar/Alt-Tab. Using a normal Window gives us
         # a taskbar entry that carries the app icon. WindowTitle drives the label.
+        # (Mini mode later adds Tool so the strip itself is the taskbar UI.)
         self.setWindowTitle("Token Maxxing")
         self.setWindowIcon(_app_icon())
         self.setWindowFlags(
@@ -1070,12 +1635,12 @@ class OverlayWindow(QWidget):
             Qt.WindowType.Window
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        pad = PANEL_PAD
+        fw, fh = self._full_size()
         # Lock the size: a frameless/translucent window left merely resizable
         # "expands" when dragged onto a monitor with a different DPI scale —
         # Qt re-derives its physical size from the new scale factor. A fixed
         # size keeps the overlay the same logical size across all screens.
-        self.setFixedSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
+        self.setFixedSize(fw, fh)
         self.show()
         _enable_acrylic(int(self.winId()))
         # Re-assert size + acrylic whenever the window crosses to another
@@ -1088,8 +1653,10 @@ class OverlayWindow(QWidget):
             QTimer.singleShot(0, self._win_apply_native_icon)
 
     def _on_screen_changed(self, _screen):
-        pad = PANEL_PAD
-        self.setFixedSize(PANEL_W + pad * 2, PANEL_H + pad * 2)
+        if self._compact:
+            self._dock_mini()
+        else:
+            self._apply_full_size()
         _enable_acrylic(int(self.winId()))
         self.update()
 
@@ -1106,9 +1673,16 @@ class OverlayWindow(QWidget):
         self._stack.setStyleSheet("background: transparent;")
         root.addWidget(self._stack)
 
+        self._update_banner = UpdateBanner(self)
+        self._update_banner.hide()
+        self._update_banner.open_clicked.connect(self._open_update)
+        self._update_banner.dismiss_clicked.connect(self._dismiss_update)
+        root.addWidget(self._update_banner)
+
         self._build_stats_page()
         self._build_auth_page()
         self._build_settings_page()
+        self._build_tutorial_page()
 
     _FIELD_STYLE = """
         QLineEdit {
@@ -1131,7 +1705,7 @@ class OverlayWindow(QWidget):
         lay.setContentsMargins(PANEL_PAD, PANEL_PAD, PANEL_PAD, PANEL_PAD)
         lay.setSpacing(0)
 
-        self._canvas = DashboardCanvas(self._frame)
+        self._canvas = DashboardCanvas(self._frame, scale=self._scale)
         lay.addWidget(self._canvas, 0, Qt.AlignmentFlag.AlignCenter)
 
     # Page 1 — login ──────────────────────────────────────────────────────────
@@ -1326,6 +1900,114 @@ class OverlayWindow(QWidget):
 
         self._settings_path: str | None = None
 
+    # Page 3 — first-run tutorial ─────────────────────────────────────────────
+
+    _TUTORIAL_STEPS = (
+        ("Fade",
+         "Scroll the wheel on the widget to fade it. Try it now.",
+         "opacity"),
+        ("Size",
+         "Hold Ctrl and scroll to resize. Try it now.",
+         "size"),
+        ("The numbers",
+         "SESSION is your 5h block. WEEKLY is 7 days. Cursor cards show "
+         "AUTO / API. Click cycles accounts. Drag moves the widget.",
+         None),
+        ("Menu and clock",
+         "Right-click for refresh, settings, and re-auth. Minimize to clock "
+         "docks next to the tray. Double-click the strip to expand.",
+         None),
+    )
+
+    def _build_tutorial_page(self):
+        self._tut_frame = QWidget()
+        self._tut_frame.setStyleSheet("background: transparent;")
+        self._stack.addWidget(self._tut_frame)
+
+        tlay = QVBoxLayout(self._tut_frame)
+        tlay.setContentsMargins(14, 14, 14, 12)
+        tlay.setSpacing(8)
+
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 2)
+        hdr.setSpacing(8)
+        self._tut_title = QLabel("Fade")
+        self._tut_title.setStyleSheet(
+            "color: #EBEBF0; font-size: 12px; font-weight: 700; "
+            "background: transparent;")
+        hdr.addWidget(self._tut_title, 1)
+        self._tut_dots = QLabel("")
+        self._tut_dots.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._tut_dots.setStyleSheet(
+            "color: #00A8F8; font-size: 9px; background: transparent;")
+        hdr.addWidget(self._tut_dots)
+        tlay.addLayout(hdr)
+
+        tlay.addWidget(self._divider(2))
+
+        self._tut_body = QLabel("")
+        self._tut_body.setWordWrap(True)
+        self._tut_body.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._tut_body.setStyleSheet(
+            "color: #C8C8D8; font-size: 11px; background: transparent; "
+            "padding: 4px 0 2px 0;")
+        tlay.addWidget(self._tut_body)
+
+        self._tut_hero = QLabel("")
+        self._tut_hero.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tut_hero.setStyleSheet(
+            "color: #00A8F8; font-size: 32px; font-weight: 800; "
+            "background: transparent; padding: 8px 0;")
+        tlay.addWidget(self._tut_hero, 1)
+
+        self._tut_live = QLabel("")
+        self._tut_live.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tut_live.setStyleSheet(
+            "color: #808098; font-size: 10px; font-weight: 600; "
+            "background: transparent; padding: 0 0 8px 0;")
+        tlay.addWidget(self._tut_live)
+
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 4, 0, 0)
+        nav.setSpacing(8)
+        skip_style = """
+            QPushButton {
+                background: rgba(255,255,255,0.08); color: #C8C8D8;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 7px; font-size: 11px; font-weight: 600;
+                padding: 8px 10px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.14); }
+            QPushButton:disabled { color: #555568; }
+        """
+        next_style = """
+            QPushButton {
+                background: rgba(40,188,80,0.85); color: #0A0A10;
+                border: none; border-radius: 7px;
+                font-size: 11px; font-weight: 700; padding: 8px 10px;
+            }
+            QPushButton:hover  { background: rgba(40,188,80,1.0); }
+            QPushButton:pressed { background: rgba(30,150,60,1.0); }
+        """
+        self._btn_tut_skip = QPushButton("Skip")
+        self._btn_tut_skip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_tut_skip.setStyleSheet(skip_style)
+        self._btn_tut_skip.clicked.connect(self._finish_tutorial)
+        self._btn_tut_back = QPushButton("Back")
+        self._btn_tut_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_tut_back.setStyleSheet(skip_style)
+        self._btn_tut_back.clicked.connect(self._tutorial_back)
+        self._btn_tut_next = QPushButton("Next")
+        self._btn_tut_next.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_tut_next.setStyleSheet(next_style)
+        self._btn_tut_next.clicked.connect(self._tutorial_next)
+        nav.addWidget(self._btn_tut_skip)
+        nav.addWidget(self._btn_tut_back)
+        nav.addWidget(self._btn_tut_next)
+        tlay.addLayout(nav)
+
     # ── Widget helpers ────────────────────────────────────────────────────────
 
     def _divider(self, top_margin: int) -> QFrame:
@@ -1342,8 +2024,90 @@ class OverlayWindow(QWidget):
         self._stack.setCurrentIndex(0)
         self._canvas.set_boot("Fetching usage...")
         self._start_polling()
+        if not load_app_config()["tutorial_done"]:
+            QTimer.singleShot(0, self._show_tutorial)
+        elif load_app_config()["compact_mode"] and _cred_files():
+            QTimer.singleShot(0, lambda: self._enter_mini(persist=False))
+
+    def _show_tutorial(self):
+        if self._compact:
+            self._enter_full(persist=False)
+        self._tut_step = 0
+        self._apply_tutorial_step()
+        self._stack.setCurrentIndex(3)
+
+    def _apply_tutorial_step(self):
+        steps = self._TUTORIAL_STEPS
+        n = len(steps)
+        i = max(0, min(self._tut_step, n - 1))
+        self._tut_step = i
+        title, body, _live = steps[i]
+        self._tut_title.setText(title)
+        self._tut_body.setText(body)
+        dots = "  ".join("●" if k == i else "○" for k in range(n))
+        self._tut_dots.setText(dots)
+        last = i == n - 1
+        self._btn_tut_back.setEnabled(i > 0)
+        self._btn_tut_next.setText("Got it" if last else "Next")
+        self._refresh_tutorial_readout()
+
+    def _refresh_tutorial_readout(self):
+        if not hasattr(self, "_tut_hero"):
+            return
+        if self._stack.currentIndex() != 3:
+            return
+        live = self._TUTORIAL_STEPS[self._tut_step][2]
+        if live == "opacity":
+            pct = int(round(self.windowOpacity() * 100))
+            self._tut_hero.setText(f"{pct}%")
+            self._tut_live.setText("scroll to fade")
+            self._tut_hero.show()
+            self._tut_live.show()
+            self._tut_body.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            lay = self._tut_frame.layout()
+            lay.setStretch(2, 0)
+            lay.setStretch(3, 1)
+        elif live == "size":
+            pct = int(round(self._scale * 100))
+            self._tut_hero.setText(f"{pct}%")
+            self._tut_live.setText("Ctrl + scroll to resize")
+            self._tut_hero.show()
+            self._tut_live.show()
+            self._tut_body.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            lay = self._tut_frame.layout()
+            lay.setStretch(2, 0)
+            lay.setStretch(3, 1)
+        else:
+            self._tut_hero.hide()
+            self._tut_live.hide()
+            self._tut_body.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            lay = self._tut_frame.layout()
+            lay.setStretch(2, 1)
+            lay.setStretch(3, 0)
+
+    def _tutorial_back(self):
+        self._tut_step = max(0, self._tut_step - 1)
+        self._apply_tutorial_step()
+
+    def _tutorial_next(self):
+        if self._tut_step >= len(self._TUTORIAL_STEPS) - 1:
+            self._finish_tutorial()
+            return
+        self._tut_step += 1
+        self._apply_tutorial_step()
+
+    def _finish_tutorial(self):
+        save_app_config(tutorial_done=True)
+        self._stack.setCurrentIndex(0)
+        self._refresh_display()
+        if load_app_config()["compact_mode"]:
+            self._enter_mini(persist=False)
 
     def _show_auth(self):
+        self._enter_full(persist=False)
         self._stack.setCurrentIndex(1)
         # Reset form to initial state
         self._inp_code.clear()
@@ -1358,10 +2122,13 @@ class OverlayWindow(QWidget):
     def _hide_settings(self):
         self._stack.setCurrentIndex(0)
         self._refresh_display()
+        if load_app_config()["compact_mode"]:
+            self._enter_mini(persist=False)
 
     def _show_settings(self):
         # Per-account fields only apply to Claude accounts (those with a path);
         # the Sources section is global and always shown.
+        self._enter_full(persist=False)
         path = None
         if self._accounts:
             path = self._accounts[self._acct_idx].get("path")
@@ -1415,10 +2182,10 @@ class OverlayWindow(QWidget):
         self._acct_idx = 0
         self._stack.setCurrentIndex(0)
         self._refresh_display()
-        # Re-enabling Cursor repopulates instantly (its endpoint isn't rate-limited).
-        # Claude is never fetched on save — it appears on the next 2-min poll.
         if show_cursor and not prev["show_cursor"]:
             self._fetch_cursor_only()
+        if load_app_config()["compact_mode"]:
+            self._enter_mini(persist=False)
 
     # ── Auth flow ─────────────────────────────────────────────────────────────
 
@@ -1483,6 +2250,52 @@ class OverlayWindow(QWidget):
             self._rotate_timer.timeout.connect(self._rotate_account)
         self._poll_timer.start(POLL_MS)
         self._rotate_timer.start(5000)
+
+    def _start_update_checks(self) -> None:
+        if not hasattr(self, "_update_timer"):
+            self._update_timer = QTimer(self)
+            self._update_timer.timeout.connect(self._check_for_update)
+        self._update_timer.start(UPDATE_CHECK_MS)
+        QTimer.singleShot(2500, self._check_for_update)
+
+    def _check_for_update(self) -> None:
+        if self._update_checking:
+            return
+        self._update_checking = True
+        thread = UpdateCheckThread(self)
+        thread.done.connect(self._on_update_check)
+        thread.done.connect(lambda: setattr(self, "_update_checking", False))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_update_check(self, info) -> None:
+        cur = _parse_version(APP_VERSION)
+        if not info or not cur or info.get("tuple", (0, 0)) <= cur:
+            return
+        dismissed = load_app_config().get("dismissed_update") or ""
+        if dismissed == info["version"]:
+            return
+        self._update_info = info
+        self._update_banner.set_version(info["version"])
+        if not self._compact:
+            self._update_banner.show()
+            self._apply_full_size()
+        self.update()
+
+    def _open_update(self) -> None:
+        info = self._update_info
+        if not info:
+            return
+        webbrowser.open(info["url"])
+
+    def _dismiss_update(self) -> None:
+        info = self._update_info
+        if info:
+            save_app_config(dismissed_update=info["version"])
+        self._update_info = None
+        self._update_banner.hide()
+        self._apply_full_size()
+        self.update()
 
     def _manual_refresh_wait(self) -> int:
         """Seconds until another manual refresh is allowed (0 = ok now)."""
@@ -1607,6 +2420,8 @@ class OverlayWindow(QWidget):
     def _refresh_display(self):
         if not self._accounts:
             self._canvas.set_boot("Fetching usage...")
+            if self._compact:
+                self.update()
             return
 
         a   = self._accounts[self._acct_idx]
@@ -1616,6 +2431,8 @@ class OverlayWindow(QWidget):
             dash["account"] = self._refresh_notice[:23]
             dash["ok"] = True
         self._canvas.set_dashboard(dash)
+        if self._compact:
+            self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────────
 
@@ -1624,58 +2441,100 @@ class OverlayWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = 6 if self._compact else 13
         body = QPainterPath()
-        body.addRoundedRect(r, 13, 13)
+        body.addRoundedRect(r, radius, radius)
 
         p.setClipPath(body)
         p.fillPath(body, QBrush(C_BG))
 
-        shimmer = QLinearGradient(0, 0, 0, 38)
-        shimmer.setColorAt(0.0, QColor(255, 255, 255, 18))
-        shimmer.setColorAt(1.0, QColor(255, 255, 255,  0))
-        p.fillPath(body, QBrush(shimmer))
+        if not self._compact:
+            shimmer = QLinearGradient(0, 0, 0, 38)
+            shimmer.setColorAt(0.0, QColor(255, 255, 255, 18))
+            shimmer.setColorAt(1.0, QColor(255, 255, 255,  0))
+            p.fillPath(body, QBrush(shimmer))
 
         p.setClipping(False)
         p.setPen(QPen(C_BORDER, 1.0))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(body)
 
+        if self._compact:
+            p.setClipPath(body)
+            dash = self._mini_dash()
+            _draw_mini(p, dash, time.time() * 4, self.width(), self.height())
+
+    def _mini_dash(self) -> dict:
+        if not self._accounts:
+            return {
+                "ok": True, "kind": "claude",
+                "session": {"pct": 0, "active": False},
+                "weekly": {"pct": 0},
+                "update": bool(self._update_info),
+            }
+        a = self._accounts[self._acct_idx]
+        dash = self._account_to_dash(a, self._acct_idx, len(self._accounts))
+        if self._refresh_notice and time.monotonic() < self._refresh_notice_until:
+            dash["ok"] = True
+        dash["update"] = bool(self._update_info)
+        return dash
+
     # ── Mouse events ──────────────────────────────────────────────────────────
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton and not self._compact:
             gp = e.globalPosition().toPoint()
             self._drag_pos   = gp - self.frameGeometry().topLeft()
             self._drag_start = gp
+        elif e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = e.globalPosition().toPoint()
+            self._drag_pos = None
         e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._drag_pos is not None and e.buttons() == Qt.MouseButton.LeftButton:
+        if (not self._compact and self._drag_pos is not None
+                and e.buttons() == Qt.MouseButton.LeftButton):
             self.move(e.globalPosition().toPoint() - self._drag_pos)
         e.accept()
+
+    def _cycle_from_click(self) -> None:
+        if len(self._accounts) > 1:
+            self._acct_idx = (self._acct_idx + 1) % len(self._accounts)
+            self._refresh_display()
 
     def mouseReleaseEvent(self, e):
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._drag_start is not None
-                and self._stack.currentIndex() == 0   # only on stats page
+                and (self._compact or self._stack.currentIndex() == 0)
                 and len(self._accounts) > 1):
             delta = e.globalPosition().toPoint() - self._drag_start
             if abs(delta.x()) < 5 and abs(delta.y()) < 5:
-                self._acct_idx = (self._acct_idx + 1) % len(self._accounts)
-                self._refresh_display()
+                if self._compact:
+                    self._click_timer.start(QApplication.doubleClickInterval())
+                else:
+                    self._cycle_from_click()
         self._drag_pos   = None
         self._drag_start = None
         e.accept()
 
     def wheelEvent(self, e):
         delta = e.angleDelta().y() / 120
-        op    = max(0.15, min(1.0, self.windowOpacity() + delta * 0.05))
+        if (not self._compact
+                and e.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._set_scale(self._scale + delta * SCALE_STEP)
+            e.accept()
+            return
+        op = max(0.15, min(1.0, self.windowOpacity() + delta * 0.05))
         self.setWindowOpacity(op)
         e.accept()
 
     def mouseDoubleClickEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            self.setWindowOpacity(0.92)
+            if self._compact:
+                self._click_timer.stop()
+                self._enter_full(persist=True)
+            else:
+                self.setWindowOpacity(0.92)
         e.accept()
 
     # ── Context menu ──────────────────────────────────────────────────────────
@@ -1701,8 +2560,25 @@ class OverlayWindow(QWidget):
             }
         """)
 
-        if self._stack.currentIndex() == 0:
+        on_stats = self._compact or self._stack.currentIndex() == 0
+        if self._update_info:
+            ver = self._update_info["version"]
+            a_upd = QAction(f"↓  Get v{ver}", self)
+            a_upd.triggered.connect(self._open_update)
+            menu.addAction(a_upd)
+            menu.addSeparator()
+        if on_stats:
             # Stats page actions
+            if self._compact:
+                a_expand = QAction("□  Expand", self)
+                a_expand.triggered.connect(lambda: self._enter_full(persist=True))
+                menu.addAction(a_expand)
+            else:
+                a_mini = QAction("–  Minimize to clock", self)
+                a_mini.triggered.connect(lambda: self._enter_mini(persist=True))
+                menu.addAction(a_mini)
+            menu.addSeparator()
+
             wait = self._manual_refresh_wait()
             label = "⟳  Refresh now" if wait == 0 else f"⟳  Refresh now ({wait}s)"
             a_refresh = QAction(label, self)
@@ -1719,6 +2595,10 @@ class OverlayWindow(QWidget):
             a_sett.triggered.connect(self._show_settings)
             menu.addAction(a_sett)
 
+            a_tut = QAction("?  Show tutorial", self)
+            a_tut.triggered.connect(self._show_tutorial)
+            menu.addAction(a_tut)
+
             menu.addSeparator()
 
             a_reauth = QAction("↩  Re-auth (sign in again)", self)
@@ -1726,11 +2606,19 @@ class OverlayWindow(QWidget):
             menu.addAction(a_reauth)
 
         else:
-            # Auth page — offer to go back if credentials exist
-            if _cred_files():
+            # Auth / tutorial / settings — offer to go back if credentials exist
+            if self._stack.currentIndex() == 3:
+                a_skip = QAction("Skip tutorial", self)
+                a_skip.triggered.connect(self._finish_tutorial)
+                menu.addAction(a_skip)
+                menu.addSeparator()
+            elif _cred_files():
                 a_back = QAction("← Back to stats", self)
                 a_back.triggered.connect(self._show_main)
                 menu.addAction(a_back)
+                a_tut = QAction("?  Show tutorial", self)
+                a_tut.triggered.connect(self._show_tutorial)
+                menu.addAction(a_tut)
                 menu.addSeparator()
 
         opacity_label = QAction(f"Opacity: {int(self.windowOpacity() * 100)}%", self)
@@ -1742,6 +2630,20 @@ class OverlayWindow(QWidget):
             a = QAction(label, self)
             a.triggered.connect(lambda _, v=val: self.setWindowOpacity(v))
             menu.addAction(a)
+
+        if not self._compact:
+            menu.addSeparator()
+            size_label = QAction(f"Size: {int(round(self._scale * 100))}%", self)
+            size_label.setEnabled(False)
+            menu.addAction(size_label)
+            for label, val in [("  100%", 1.00), ("  150%", 1.50),
+                                ("  200%", 2.00), ("  250%", 2.50),
+                                ("  300%", 3.00)]:
+                a = QAction(label, self)
+                a.setCheckable(True)
+                a.setChecked(abs(self._scale - val) < 0.01)
+                a.triggered.connect(lambda _, v=val: self._set_scale(v))
+                menu.addAction(a)
 
         menu.addSeparator()
 

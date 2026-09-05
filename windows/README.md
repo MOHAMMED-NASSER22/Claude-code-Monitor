@@ -55,11 +55,18 @@ You can also mint credentials with the repo’s `mint_token.sh` at the project r
 
 | Action | Effect |
 |--------|--------|
-| Drag | Move widget |
+| Drag | Move widget (full overlay only) |
 | Left-click | Cycle accounts (multi-account) |
 | Scroll wheel | Adjust transparency |
-| Double-click | Reset transparency |
-| Right-click | Menu: refresh, settings, re-auth, opacity, exit |
+| Ctrl+scroll | Resize the full overlay (100–300%, remembered) |
+| Double-click | Full: reset transparency. Mini: expand to the full overlay |
+| Right-click → **Minimize to clock** | Collapse to a one-line strip on the taskbar, left of the clock (`S 38%  W 62%`, or `A` / `P` on a Cursor card) |
+| Right-click → **Expand** | Restore the full overlay (also from mini) |
+| Right-click | Menu: refresh, settings, tutorial, re-auth, size, opacity, exit |
+| Right-click → **Show tutorial** | Replay the first-run tour (scroll to fade, Ctrl+scroll to resize, then the rest) |
+| Update bar (v1.5+) | Appears when a newer GitHub Release exists. Click to open it; ✕ dismisses that version |
+
+Mini mode is remembered in `overlay_config.json` (`compact_mode`) and restored on the next launch.
 
 ## Settings (right-click → ⚙ Settings)
 
@@ -79,6 +86,10 @@ You can also mint credentials with the repo’s `mint_token.sh` at the project r
 | Show Claude | `show_claude` | on |
 | Show Cursor (Auto + API) | `show_cursor` | on |
 | Cursor display name | `cursor_name` | account email |
+| Mini mode beside the clock | `compact_mode` | off |
+| Overlay size | `overlay_scale` | 2.0 (200%) |
+| Dismissed update | `dismissed_update` | (empty) |
+| First-run tutorial completed | `tutorial_done` | off |
 
 Toggle either source off to hide it (or to show just one). Saving re-fetches so the cards update immediately.
 
@@ -123,7 +134,7 @@ python token_bridge.py
 
 ## Distribute
 
-`dist/` and `build/` are gitignored. Attach `TokenMaxxing.exe` to a [GitHub Release](https://github.com/aabdlwahab/Claude-code-Monitor/releases) — see issue #1.
+`dist/` and `build/` are gitignored. Attach `TokenMaxxing.exe` to a [GitHub Release](https://github.com/MOHAMMED-NASSER22/Claude-code-Monitor/releases). From v1.5 the overlay checks that page for newer versions.
 
 ## Files
 
