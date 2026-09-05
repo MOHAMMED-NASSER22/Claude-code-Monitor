@@ -3,8 +3,8 @@
 # Windows PE version resource — helps Explorer and the taskbar identify the app.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 5, 0, 0),
-    prodvers=(1, 5, 0, 0),
+    filevers=(1, 6, 0, 0),
+    prodvers=(1, 6, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -19,11 +19,11 @@ VSVersionInfo(
         u'040904B0',
         [StringStruct(u'CompanyName', u'Token Maxxing'),
         StringStruct(u'FileDescription', u'Token Maxxing — usage overlay'),
-        StringStruct(u'FileVersion', u'1.5.0.0'),
+        StringStruct(u'FileVersion', u'1.6.0.0'),
         StringStruct(u'InternalName', u'TokenMaxxing'),
         StringStruct(u'OriginalFilename', u'TokenMaxxing.exe'),
         StringStruct(u'ProductName', u'Token Maxxing'),
-        StringStruct(u'ProductVersion', u'1.5.0.0')])
+        StringStruct(u'ProductVersion', u'1.6.0.0')])
       ]),
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
   ]

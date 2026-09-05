@@ -355,7 +355,7 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-APP_VERSION  = "1.5"            # keep in sync with windows/version_info.txt
+APP_VERSION  = "1.6"            # keep in sync with windows/version_info.txt
 GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
 UPDATE_BANNER_H = 26

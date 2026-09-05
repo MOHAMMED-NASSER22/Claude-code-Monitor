@@ -1,4 +1,10 @@
-## Token Maxxing — Windows desktop overlay v1.5
+## Token Maxxing — Windows desktop overlay v1.6
+
+### What's new in v1.6
+
+- **Release 1.6** — same overlay as v1.5 (mini mode beside the clock, resize,
+  tutorial, in-app update check). Publishing this tag makes running **v1.5**
+  builds show the update bar: **Update 1.6 · click to download**.
 
 ### What's new in v1.5
 
