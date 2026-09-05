@@ -839,7 +839,7 @@ def _fetch_claude_accounts() -> list[dict]:
                 status, resp = _http_json("GET", USAGE_URL, headers=headers)
             if status == 429:
                 wait = int(round(_rate_limited_remaining())) or 300
-                raise RuntimeError(f"Rate limited — retry in {wait}s")
+                raise RuntimeError(_retry_in_text(wait))
             if status != 200 or not isinstance(resp, dict):
                 raise RuntimeError(f"Usage API returned HTTP {status}")
             fh = resp.get("five_hour") or {}
@@ -971,6 +971,31 @@ class Gfx:
 
 def _text_w(s: str, size: int = 1) -> int:
     return len(str(s)) * 6 * size
+
+
+HEADER_CHARS = 23  # dashboard title; 6px cells, must not cover the poll ring
+
+
+def _fit_header(text: str, n: int = HEADER_CHARS) -> str:
+    """Clip overlay header text, keeping a trailing 'retry in 12s' countdown."""
+    s = str(text)
+    if len(s) <= n:
+        return s
+    m = re.search(r"(retry in \d+s)$", s, re.I)
+    if m and len(m.group(1)) <= n:
+        return m.group(1)
+    m = re.search(r"(\d+s)$", s, re.I)
+    if m:
+        tail = m.group(1)
+        keep = n - len(tail) - 1
+        if keep > 0:
+            return s[:keep].rstrip() + " " + tail
+        return tail[:n]
+    return s[:n]
+
+
+def _retry_in_text(seconds: float) -> str:
+    return f"Retry in {max(1, int(seconds))}s"
 
 
 def _fmt_dur(minutes: int) -> str:
@@ -1127,9 +1152,7 @@ def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: flo
 def _draw_dashboard(g: Gfx, d: dict, t: float,
                     poll_frac: float = 0.0, fetching: bool = False) -> None:
     s, w = d["session"], d["weekly"]
-    acct = d.get("account") or "CLAUDE USAGE"
-    if len(acct) > 23:
-        acct = acct[:23]
+    acct = _fit_header(d.get("account") or "CLAUDE USAGE")
     ok = d.get("ok", True)
 
     cursor = d.get("kind") == "cursor"
@@ -1157,7 +1180,7 @@ def _draw_dashboard(g: Gfx, d: dict, t: float,
 
 
 def _draw_boot(g: Gfx, status: str, t: float) -> None:
-    err = bool(re.search(r"wait|unreach|error|fail", status, re.I))
+    err = bool(re.search(r"wait|unreach|error|fail|rate|retry|limit", status, re.I))
     col = C_RED if err else C_CLAUDE
     _draw_spark(g, 80, 36, t, 18, 5, 8, col, C_TEXT)
     tw = _text_w("TOKEN", 2)
@@ -1174,8 +1197,10 @@ def _draw_boot(g: Gfx, status: str, t: float) -> None:
         seg, span = 22, tw_bar - 22
         p = math.sin(t * 1.3) * 0.5 + 0.5
         g.fill_rect(tx + round(span * p), ty, seg, 3, C_ACCENT)
-    stw = _text_w(status, 1)
-    g.text(status, (160 - stw) // 2, 114, C_RED if err else C_DIM, 1)
+    max_ch = 160 // 6
+    shown = status if len(status) <= max_ch else status[-max_ch:]
+    stw = _text_w(shown, 1)
+    g.text(shown, max(0, (160 - stw) // 2), 114, C_RED if err else C_DIM, 1)
 
 
 def _draw_mini(p: QPainter, d: dict, t: float, w: int, h: int) -> None:
@@ -2323,7 +2348,7 @@ class OverlayWindow(QWidget):
         remaining = _rate_limited_remaining()
         if remaining > 0:
             # Honor the server's Retry-After: don't hammer during cooldown.
-            self._refresh_notice = f"Rate limited {int(remaining)}s"
+            self._refresh_notice = _retry_in_text(remaining)
             self._refresh_notice_until = time.monotonic() + min(3.0, remaining)
             self._refresh_display()
             return
@@ -2385,12 +2410,12 @@ class OverlayWindow(QWidget):
     def _account_to_dash(self, a: dict, idx: int, cnt: int) -> dict:
         acct = a["label"]
         if not a["ok"]:
-            acct = (a.get("error") or acct)[:23]
+            acct = _fit_header(a.get("error") or acct)
         elif cnt > 1:
             suffix = f" {idx + 1}/{cnt}"
-            acct = (acct[: max(0, 23 - len(suffix))] + suffix)[:23]
+            acct = _fit_header(acct[: max(0, HEADER_CHARS - len(suffix))] + suffix)
         else:
-            acct = acct[:23]
+            acct = _fit_header(acct)
         sess_min = a.get("session_min") or 0
         week_min = a.get("weekly_min") or 0
         cursor = a.get("kind") == "cursor"
@@ -2417,6 +2442,19 @@ class OverlayWindow(QWidget):
             },
         }
 
+    def _ensure_retry_timer(self, on: bool) -> None:
+        """Tick the header countdown once a second while a 429 cooldown is active."""
+        tm = getattr(self, "_retry_timer", None)
+        if on:
+            if tm is None:
+                tm = QTimer(self)
+                tm.timeout.connect(self._refresh_display)
+                self._retry_timer = tm
+            if not tm.isActive():
+                tm.start(1000)
+        elif tm is not None and tm.isActive():
+            tm.stop()
+
     def _refresh_display(self):
         if not self._accounts:
             self._canvas.set_boot("Fetching usage...")
@@ -2427,9 +2465,14 @@ class OverlayWindow(QWidget):
         a   = self._accounts[self._acct_idx]
         cnt = len(self._accounts)
         dash = self._account_to_dash(a, self._acct_idx, cnt)
-        if self._refresh_notice and time.monotonic() < self._refresh_notice_until:
-            dash["account"] = self._refresh_notice[:23]
+        remaining = _rate_limited_remaining()
+        if remaining > 0 and a.get("kind") != "cursor":
+            dash["account"] = _fit_header(_retry_in_text(remaining))
+            dash["ok"] = False
+        elif self._refresh_notice and time.monotonic() < self._refresh_notice_until:
+            dash["account"] = _fit_header(self._refresh_notice)
             dash["ok"] = True
+        self._ensure_retry_timer(remaining > 0)
         self._canvas.set_dashboard(dash)
         if self._compact:
             self.update()

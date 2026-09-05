@@ -2,9 +2,9 @@
 
 ### What's new in v1.6
 
-- **Release 1.6** — same overlay as v1.5 (mini mode beside the clock, resize,
-  tutorial, in-app update check). Publishing this tag makes running **v1.5**
-  builds show the update bar: **Update 1.6 · click to download**.
+- **Rate-limit countdown** — a 429 used to clip the header to `Rate limited — retry i`,
+  hiding the seconds. It now shows **Retry in 247s** in full and ticks down each second
+  until the cooldown ends.
 
 ### What's new in v1.5
 
