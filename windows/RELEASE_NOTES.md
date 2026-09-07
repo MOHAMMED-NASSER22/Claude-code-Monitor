@@ -1,4 +1,41 @@
-## Token Maxxing — Windows desktop overlay v1.4
+## Token Maxxing — Windows desktop overlay v1.7
+
+### What's new in v1.7
+
+- **Mini mode stays on the taskbar** — the clock strip is embedded in the
+  Windows 11 taskbar (left of the clock), so clicking another app no longer
+  covers or hides it. It stays there until you **Expand** or **Exit**.
+- **No usage fetch on every open** — last Claude/Cursor numbers are cached.
+  Relaunching (or testing) within the 2-minute poll window reuses that snapshot
+  instead of hitting the rate-limited usage API. A 429 cooldown is remembered
+  across restarts.
+- **Mini strip no longer flickers** — acrylic blur is off in clock mode (it
+  painted white static on a Win11 taskbar child). The strip is an opaque bar.
+- **Mini spark/cube animates again** — tray-embedded strip forces a native
+  redraw each frame so the logo keeps spinning without bringing back static.
+
+### What's new in v1.6
+
+- **Release 1.6** — same overlay as v1.5 (mini mode beside the clock, resize,
+  tutorial, in-app update check). Publishing this tag makes running **v1.5**
+  builds show the update bar: **Update 1.6 · click to download**.
+
+### What's new in v1.5
+
+- **Minimize to clock** — right-click the overlay and choose **Minimize to clock**
+  to collapse it into a one-line strip on the taskbar, just left of the system
+  clock (TrafficMonitor / NetSpeed style). Shows `S 38%  W 62%` for Claude or
+  `A` / `P` for Cursor Auto / API, plus the spark or cube. Double-click or
+  **Expand** restores the full widget. The mode is remembered across launches.
+- **Resize the overlay** — right-click → **Size** (100–300%), or **Ctrl+scroll**
+  on the full widget. Size is remembered. Mini mode stays taskbar-height.
+- **Update check** — from v1.5 the overlay checks GitHub every 6 hours (and shortly
+  after launch). If a newer release is published, a small bar appears:
+  **Update 1.x · click to download**. ✕ dismisses that version. Mini mode shows
+  a blue tick on the left; right-click → **Get v1.x** opens the release.
+- **First-run tutorial** — after sign-in (and for existing installs until skipped),
+  a short in-widget tour. Scroll to fade and Ctrl+scroll to resize come first
+  (try them on those screens). Right-click → **Show tutorial** to replay.
 
 ### What's new in v1.4
 
@@ -40,11 +77,12 @@ Floating always-on-top widget that tracks your AI usage across **Claude** and **
 
 ### Controls
 
-- **Drag** to move
+- **Drag** to move (full overlay)
 - **Left-click** to cycle accounts
 - **Scroll wheel** → opacity
-- **Double-click** → reset opacity
-- **Right-click** → refresh, settings, re-auth, exit
+- **Ctrl+scroll** → resize full overlay (100–300%)
+- **Double-click** → reset opacity (full) or expand (mini)
+- **Right-click** → minimize to clock / expand, size, tutorial, refresh, settings, re-auth, exit
 
 ### Settings (right-click → ⚙)
 
