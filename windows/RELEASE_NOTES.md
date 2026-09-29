@@ -1,4 +1,46 @@
-## Token Maxxing — Windows desktop overlay v1.7
+## Token Maxxing — Windows desktop overlay v1.8
+
+### What's new in v1.8
+
+- **All accounts at once** — with 2+ accounts (e.g. Claude Max, Claude Pro,
+  Cursor) the widget lists every one together, each with its own rows; the
+  window height fits exactly. A single account keeps the big-card view.
+- **Plan-aware usage, like claude.ai's usage page** — reads the full `limits`
+  list from the usage API. Max shows an extra per-model weekly row (e.g.
+  **FABLE**); Pro shows session + weekly. Nothing is hardcoded per plan.
+- **Plan badge** — `MAX5x`, `MAX20x`, `PRO`, ... beside each account (checked
+  once a day, never counts against the usage rate limit).
+- **Add / remove accounts** — Settings has a Claude-accounts picker with
+  **+ Add account** and **Remove**; also right-click → **Add account**. Switch
+  claude.ai in your browser to the other account before signing in. Re-auth
+  updates the matching account instead of overwriting the first one.
+- **Taskbar strip shows every account** — Claude Max, Pro and Cursor side by
+  side (logo + plan tag; top number = session / Auto, bottom = weekly / API).
+  It copies the real taskbar behind it (Win11's top hairline, see-through
+  tint, light or dark theme, any accent colour) so it blends in on any PC,
+  switches to darker text on light taskbars, is narrow enough to fit beside
+  the tray, and you can drag it along the taskbar to any free spot (remembered).
+- **Mini strip no longer flickers or gets cut off** — it is now sized in
+  native pixels once docked (Qt was applying the DPI scale twice, shrinking the
+  strip and re-sizing it every 250 ms).
+- **Claude spark beside each Claude account**, matching Cursor's cube.
+- **Safer credentials** — a token refresh can no longer be lost to a failed
+  save, a Settings save racing a refresh, an unreadable file, or quitting
+  mid-refresh; only one copy of the app can run at a time.
+- **Auto-start 5h session is now off unless you turn it on** (Settings, per
+  account) because it sends a real message. Accounts that never saved this
+  setting, including ones from v1.7, start with it off. It also backs off
+  30 min after a failure and can no longer pause usage polling.
+- **Upgrading:** exit v1.7 before starting v1.8 (v1.7 has no single-instance
+  guard, and two copies refreshing the same token log each other out).
+- **Fixes** — a crash when the account list shrank, removed accounts coming
+  back, the window opening off-screen after a monitor change, polling stopping
+  after an unexpected error, Settings saving names you never typed, an
+  unreadable settings file resetting everything, and a Cancel button on the
+  sign-in page. Unexpected errors are logged to overlay_errors.log instead of
+  closing the app.
+- **Roomier Settings** — Settings and sign-in pages no longer squash at small
+  widget sizes.
 
 ### What's new in v1.7
 

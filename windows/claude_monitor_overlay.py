@@ -37,7 +37,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-import base64, glob, hashlib, json, re, secrets, ssl, threading, time, webbrowser
+import base64, glob, hashlib, json, re, secrets, ssl, tempfile, threading, time, webbrowser
 import urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
@@ -45,7 +45,7 @@ import cursor_usage   # optional extra source: Cursor Auto + API pools
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QFrame, QMenu, QLineEdit, QPushButton, QStackedWidget, QCheckBox,
+    QFrame, QMenu, QLineEdit, QPushButton, QStackedWidget, QCheckBox, QComboBox,
 )
 import math
 
@@ -54,7 +54,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QPen, QLinearGradient,
-    QPainterPath, QAction, QFont, QFontMetrics, QIcon, QGuiApplication,
+    QPainterPath, QAction, QFont, QFontMetrics, QIcon, QGuiApplication, QImage,
 )
 
 # Windows taskbar groups windows by AppUserModelID. Without a unique ID set
@@ -189,12 +189,18 @@ def _win_pin_overlay(hwnd: int, gadget: bool = False) -> None:
         pass
 
 
-def _win_embed_tray(hwnd: int, embed: bool, *, teardown: bool = False) -> None:
+def _win_embed_tray(hwnd: int, embed: bool, *, teardown: bool = False,
+                    size: tuple[int, int] | None = None, offset: int = 0) -> None:
     """Parent the clock strip to Shell_TrayWnd so it paints on the taskbar.
 
     SetParent must run *before* WS_CHILD (the reverse fails with error 87 on
     Win11). Once it is a tray child, Explorer cannot cover it by raising the
     XAML taskbar. HWND_TOPMOST cannot win that fight.
+
+    `size` is the strip's native (physical-pixel) width/height. Pass it rather
+    than resizing through Qt: once the strip is a child of the taskbar, Qt
+    applies the DPI scale twice and the strip shrinks (then fights the dock
+    timer every 250ms, which is what made it flicker).
     """
     if sys.platform != "win32" or not hwnd:
         return
@@ -232,20 +238,26 @@ def _win_embed_tray(hwnd: int, embed: bool, *, teardown: bool = False) -> None:
             if trect and nrect:
                 tl, tt, tr, tb = trect
                 nl, nt, nr, nb = nrect
-                w = nrc.right - nrc.left
-                h = tb - tt if (tr - tl) >= (tb - tt) else (nrc.bottom - nrc.top)
-                x = nl - w
+                w = size[0] if size else nrc.right - nrc.left
+                h = tb - tt if (tr - tl) >= (tb - tt) else (
+                    size[1] if size else nrc.bottom - nrc.top)
+                # `offset` = native px the user dragged the strip away from
+                # the clock (so it can sit in any free part of the taskbar).
+                x = nl - w - offset
                 mon = _win_monitor_rect(tray)
                 if mon and (tl + tr) // 2 < (mon[0] + mon[2]) // 2:
-                    x = nr
+                    x = nr + offset
                 x = max(tl, min(x, tr - w))
                 y = tt if (tr - tl) >= (tb - tt) else max(tt, min(nt - h, tb - h))
                 nrc.left, nrc.top, nrc.right, nrc.bottom = x, y, x + w, y + h
             already = user32.GetParent(hwnd) == tray
             if already:
                 cur = _win_window_rect(hwnd)
-                if cur and (cur[0], cur[1], cur[2], cur[3]) == (
-                        nrc.left, nrc.top, nrc.right, nrc.bottom):
+                # ±2px slack: Qt rounds native→logical at fractional DPI and
+                # nudges the strip 1px back, so an exact match would re-position
+                # (and flicker) on every dock tick.
+                if cur and all(abs(c - n) <= 2 for c, n in zip(
+                        cur, (nrc.left, nrc.top, nrc.right, nrc.bottom))):
                     return
             pt = wintypes.POINT(nrc.left, nrc.top)
             user32.ScreenToClient(tray, ctypes.byref(pt))
@@ -286,6 +298,110 @@ def _win_embed_tray(hwnd: int, embed: bool, *, teardown: bool = False) -> None:
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED)
     except Exception:
         pass
+
+
+def _win_grab(x: int, y: int, w: int, h: int) -> bytes | None:
+    """BGRA bytes (top-down) of a native screen rect, or None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                        ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                        ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                        ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                        ("biClrImportant", wintypes.DWORD)]
+
+        user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+        for fn, res in ((user32.GetDC, ctypes.c_void_p),
+                        (gdi32.CreateCompatibleDC, ctypes.c_void_p),
+                        (gdi32.CreateCompatibleBitmap, ctypes.c_void_p),
+                        (gdi32.SelectObject, ctypes.c_void_p)):
+            fn.restype = res
+        user32.GetDC.argtypes = [ctypes.c_void_p]
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                 wintypes.DWORD]
+        gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT,
+                                    wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p,
+                                    wintypes.UINT]
+        gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+        gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+
+        screen = user32.GetDC(None)
+        mem = gdi32.CreateCompatibleDC(screen)
+        bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+        old = gdi32.SelectObject(mem, bmp)
+        ok = gdi32.BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020)   # SRCCOPY
+        gdi32.SelectObject(mem, old)
+        bmi = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER), biWidth=w,
+                               biHeight=-h, biPlanes=1, biBitCount=32, biCompression=0)
+        buf = (ctypes.c_ubyte * (w * h * 4))()
+        rows = gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bmi), 0) if ok else 0
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(None, screen)
+        return bytes(buf) if rows == h else None
+    except Exception:
+        return None
+
+
+def _win_taskbar_backdrop(strip: tuple | None = None):
+    """(slice QImage, average QColor) of the taskbar background, or (None, None).
+
+    The slice is a 1-px-wide, full-height column of the real taskbar. Stretched
+    across the mini strip it reproduces what is behind it, including Win11's
+    lighter top hairline and any vertical gradient, on any theme/accent.
+
+    A see-through taskbar is tinted by the wallpaper, so its colour drifts
+    along its length: sample right beside the strip (`strip` = its native
+    rect) as well as the empty far edge, and take the per-row median of the
+    three so a column that lands on an app icon is outvoted.
+    """
+    if sys.platform != "win32":
+        return None, None
+    try:
+        tray, _notify = _win_tray_windows()
+        r = _win_window_rect(tray)
+        if not r:
+            return None, None
+        tl, tt, tr, tb = r
+        if (tr - tl) < (tb - tt):                 # vertical taskbar: flat colour
+            raw = _win_grab((tl + tr) // 2, tb - 3, 1, 1)
+            if not raw:
+                return None, None
+            return None, QColor(raw[2], raw[1], raw[0])
+        h = tb - tt
+        xs = [tr - 3]
+        if strip:
+            xs += [strip[0] - 2, strip[2] + 1]
+        cols = []
+        for x in xs:
+            if tl <= x < tr and not (strip and strip[0] <= x < strip[2]):
+                raw = _win_grab(x, tt, 1, h)
+                if raw:
+                    cols.append(raw)
+        if not cols:
+            return None, None
+        out = bytearray(h * 4)
+        for yy in range(h):
+            px = sorted((c[yy * 4:yy * 4 + 4] for c in cols),
+                        key=lambda b: b[0] + b[1] * 2 + b[2])
+            out[yy * 4:yy * 4 + 4] = px[len(px) // 2]
+        img = QImage(bytes(out), 1, h, 4, QImage.Format.Format_RGB32).copy()
+        body = [out[i * 4:i * 4 + 3] for i in range(h // 4, max(h // 4 + 1, 3 * h // 4))]
+        avg = QColor(sum(b[2] for b in body) // len(body),
+                     sum(b[1] for b in body) // len(body),
+                     sum(b[0] for b in body) // len(body))
+        return img, avg
+    except Exception:
+        return None, None
 
 
 def _win_redraw(hwnd: int) -> None:
@@ -405,7 +521,7 @@ def _map_native_to_qt(nx, ny, screen, nmon) -> tuple[int, int]:
     return int(round(nx / dpr)), int(round(ny / dpr))
 
 
-def _mini_dock_rect() -> QRect | None:
+def _mini_dock_rect(width: int = 0) -> QRect | None:
     """Qt-coordinate rect for the mini strip, left of the clock/tray cluster."""
     tray_hwnd, notify_hwnd = _win_tray_windows()
     tray = _win_window_rect(tray_hwnd) if tray_hwnd else None
@@ -428,7 +544,7 @@ def _mini_dock_rect() -> QRect | None:
         n_right, n_bot = _map_native_to_qt(nr, nb, screen, nmon)
         q_tray = QRect(q_left, q_top, max(1, q_right - q_left),
                        max(1, q_bottom - q_top))
-        w = MINI_W
+        w = width or MINI_W
         sg = screen.geometry()
         if horizontal:
             h = q_tray.height()
@@ -459,7 +575,7 @@ def _mini_dock_rect() -> QRect | None:
     right = (full.x() + full.width()) - (avail.x() + avail.width())
     top = avail.y() - full.y()
     bottom = (full.y() + full.height()) - (avail.y() + avail.height())
-    w = MINI_W
+    w = width or MINI_W
     if bottom > 2:
         h = max(24, bottom)
         return QRect(full.x() + full.width() - w, avail.y() + avail.height(), w, h)
@@ -489,6 +605,11 @@ REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"  # MANUAL_REDIR
 OAUTH_SCOPE  = ("user:inference user:profile user:sessions:claude_code "
                 "user:mcp_servers user:file_upload")
 USAGE_URL    = "https://api.anthropic.com/api/oauth/usage"
+PROFILE_URL  = "https://api.anthropic.com/api/oauth/profile"
+PLAN_TTL_S   = 24 * 60 * 60     # plan tier rarely changes; re-check once a day
+AUTH_SUB_DEFAULT = "Sign in to view your Claude usage stats"
+AUTH_SUB_ADD = ("Add another account: switch claude.ai in your browser to "
+                "that account first, then sign in")
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 CHEAP_MODEL  = "claude-haiku-4-5"
@@ -496,7 +617,7 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-APP_VERSION  = "1.7"            # keep in sync with windows/version_info.txt
+APP_VERSION  = "1.8"            # keep in sync with windows/version_info.txt
 GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
 UPDATE_BANNER_H = 26
@@ -611,6 +732,8 @@ SCALE_STEP    = 0.25
 SCALE     = SCALE_DEFAULT
 PANEL_W   = int(160 * SCALE)
 PANEL_H   = int(128 * SCALE)
+FORM_MIN_W = 270                           # Settings / sign-in page minimum
+FORM_MIN_H = 360
 PANEL_PAD = 8                              # glassy margin around the dashboard
                                            # (small → content fills to the edges)
 MINI_W    = 160                            # logical width of the clock strip
@@ -628,10 +751,21 @@ def _clamp_scale(value) -> float:
     return max(SCALE_MIN, min(SCALE_MAX, scale))
 
 
-def _pct_color(pct: int) -> QColor:
+def _pct_color(pct: int, light_bg: bool = False) -> QColor:
+    if light_bg:                               # readable on a light taskbar
+        if pct >= 85: return QColor(196, 32, 28)
+        if pct >= 60: return QColor(168, 110, 0)
+        return QColor(18, 128, 52)
     if pct >= 85: return C_RED
     if pct >= 60: return C_YELLOW
     return C_GREEN
+
+
+def _is_light(col: QColor | None) -> bool:
+    if col is None:
+        return False
+    # Relative luminance (sRGB weights); taskbar light theme is ~0.9.
+    return (0.2126 * col.red() + 0.7152 * col.green() + 0.0722 * col.blue()) / 255 > 0.55
 
 
 # ── Windows Acrylic blur ─────────────────────────────────────────────────────
@@ -677,7 +811,11 @@ def _set_accent(hwnd: int, *, enabled: bool,
 # ── HTTP / OAuth helpers (stdlib-only) ───────────────────────────────────────
 
 _SSL  = ssl.create_default_context()
-_lock = threading.Lock()
+_lock = threading.RLock()        # guards every credential read-modify-write
+# Rotated OAuth bundles not yet on disk (save failed / file briefly locked).
+# Each refresh invalidates the previous refresh token, so this must never be
+# dropped until a write succeeds.
+_pending_oauth: dict[str, dict] = {}
 
 
 def _b64url(raw: bytes) -> str:
@@ -705,15 +843,34 @@ def _cred_files() -> list[str]:
 
 
 def _load_doc(path: str) -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:     # tolerate a BOM
         return json.load(f)
 
 
 def _save_doc(path: str, doc: dict) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(doc, f, indent=2)
-    os.replace(tmp, path)
+    """Atomic write: unique temp + fsync + os.replace, retried because Windows
+    antivirus/indexers briefly hold the target open (PermissionError)."""
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".json",
+                               dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(6):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.05 * 2 ** attempt)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -725,15 +882,61 @@ def _load_oauth(path: str) -> dict:
     return doc.get("claudeAiOauth", doc) if isinstance(doc, dict) else doc
 
 
-def _update_cred_doc(path: str, edit) -> None:
-    try:
-        doc = _load_doc(path)
+def _update_cred_doc(path: str, edit) -> bool:
+    """Read-modify-write of a credential file's non-token fields.
+
+    Never writes when the file is missing (account removed — don't resurrect
+    it) or unreadable (writing {} would wipe the tokens). Returns success.
+    """
+    with _lock:
+        try:
+            doc = _load_doc(path)
+        except Exception:
+            return False
         if not isinstance(doc, dict):
+            return False
+        if path in _pending_oauth:
+            doc["claudeAiOauth"] = _pending_oauth[path]
+        edit(doc)
+        try:
+            _save_doc(path, doc)
+        except Exception:
+            return False
+        _pending_oauth.pop(path, None)
+        return True
+
+
+def _persist_oauth(path: str, oauth: dict, *, create: bool = False) -> None:
+    """Store an OAuth bundle, keeping the file's other fields.
+
+    After a refresh the old refresh token is already dead, so on any failure
+    the bundle stays in _pending_oauth (and _get_token keeps using + retrying
+    it) instead of being lost. create=True (new sign-in) raises on failure.
+    """
+    with _lock:
+        _pending_oauth[path] = oauth
+        try:
+            doc = _load_doc(path)
+            if not isinstance(doc, dict):
+                raise ValueError("credential file is not a JSON object")
+        except FileNotFoundError:
+            if not create:
+                _pending_oauth.pop(path, None)       # account was removed
+                return
             doc = {}
-    except Exception:
-        doc = {}
-    edit(doc)
-    _save_doc(path, doc)
+        except Exception:
+            if create:
+                raise
+            return
+        doc["claudeAiOauth"] = oauth
+        try:
+            _save_doc(path, doc)
+        except Exception:
+            if create:
+                _pending_oauth.pop(path, None)
+                raise
+            return
+        _pending_oauth.pop(path, None)
 
 
 def _account_settings(path: str) -> dict:
@@ -745,7 +948,8 @@ def _account_settings(path: str) -> dict:
         doc = {}
     return {
         "name":             (doc.get("name") or "").strip(),
-        "auto_start":       doc.get("autoStartSession", True),
+        # Off unless the user turned it on: it sends a real (tiny) message.
+        "auto_start":       doc.get("autoStartSession", False),
         "session_started":  bool(doc.get("sessionStarted", False)),
     }
 
@@ -773,14 +977,14 @@ APP_CONFIG_PATH = os.path.join(CRED_DIR, "overlay_config.json")
 _APP_CONFIG_DEFAULTS = {
     "show_claude": True, "show_cursor": True, "cursor_name": "",
     "compact_mode": False, "overlay_scale": SCALE_DEFAULT,
-    "dismissed_update": "", "tutorial_done": False,
+    "dismissed_update": "", "tutorial_done": False, "mini_offset": 0,
 }
 
 
 def load_app_config() -> dict:
     cfg = dict(_APP_CONFIG_DEFAULTS)
     try:
-        with open(APP_CONFIG_PATH) as f:
+        with open(APP_CONFIG_PATH, encoding="utf-8-sig") as f:
             data = json.load(f)
         if isinstance(data, dict):
             for k in _APP_CONFIG_DEFAULTS:
@@ -795,6 +999,10 @@ def load_app_config() -> dict:
     cfg["overlay_scale"] = _clamp_scale(cfg.get("overlay_scale", SCALE_DEFAULT))
     cfg["dismissed_update"] = str(cfg.get("dismissed_update") or "").strip()
     cfg["tutorial_done"] = bool(cfg.get("tutorial_done", False))
+    try:
+        cfg["mini_offset"] = max(0, int(cfg.get("mini_offset") or 0))
+    except (TypeError, ValueError):
+        cfg["mini_offset"] = 0
     return cfg
 
 
@@ -804,8 +1012,21 @@ def save_app_config(*, show_claude: bool | None = None,
                     compact_mode: bool | None = None,
                     overlay_scale: float | None = None,
                     dismissed_update: str | None = None,
-                    tutorial_done: bool | None = None) -> None:
+                    tutorial_done: bool | None = None,
+                    mini_offset: int | None = None) -> None:
     cfg = load_app_config()
+    try:
+        with open(APP_CONFIG_PATH, encoding="utf-8-sig") as f:
+            json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        # Unreadable: keep a copy instead of silently replacing the user's
+        # settings with defaults.
+        try:
+            os.replace(APP_CONFIG_PATH, APP_CONFIG_PATH + ".bad")
+        except OSError:
+            pass
     if show_claude is not None:
         cfg["show_claude"] = bool(show_claude)
     if show_cursor is not None:
@@ -820,6 +1041,8 @@ def save_app_config(*, show_claude: bool | None = None,
         cfg["dismissed_update"] = str(dismissed_update).strip()
     if tutorial_done is not None:
         cfg["tutorial_done"] = bool(tutorial_done)
+    if mini_offset is not None:
+        cfg["mini_offset"] = max(0, int(mini_offset))
     try:
         os.makedirs(CRED_DIR, exist_ok=True)
         tmp = APP_CONFIG_PATH + ".tmp"
@@ -878,6 +1101,10 @@ def fetch_latest_release() -> dict | None:
     }
 
 
+START_RETRY_S = 30 * 60           # after a failed auto-start, wait before retrying
+_start_failed_at: dict[str, float] = {}
+
+
 def _start_session(token: str) -> bool:
     """Anchor an idle 5h block — one minimal Haiku message (~22 tokens)."""
     headers = {
@@ -891,7 +1118,9 @@ def _start_session(token: str) -> bool:
         "system":     CLAUDE_CODE_SYSTEM,
         "messages":   [{"role": "user", "content": "hi"}],
     }
-    status, _resp = _http_json("POST", MESSAGES_URL, headers=headers, body=body)
+    # A 429 here (e.g. weekly quota spent) must not pause usage polling.
+    status, _resp = _http_json("POST", MESSAGES_URL, headers=headers, body=body,
+                               honor_retry_after=False)
     return status == 200
 
 
@@ -946,9 +1175,11 @@ def _do_refresh(path: str, oauth: dict) -> dict:
         "refresh_token": oauth.get("refreshToken", ""),
         "client_id":     CLIENT_ID,
     }
-    status, resp = _http_json("POST", TOKEN_URL, body=payload)
+    status, resp = _http_json("POST", TOKEN_URL, body=payload,
+                              honor_retry_after=False)
     if status in (400, 415, 422):
-        status, resp = _http_json("POST", TOKEN_URL, form=payload)
+        status, resp = _http_json("POST", TOKEN_URL, form=payload,
+                                  honor_retry_after=False)
     if status != 200 or not isinstance(resp, dict) or "access_token" not in resp:
         raise RuntimeError(f"token refresh failed (HTTP {status}): {resp}")
     oauth["accessToken"] = resp["access_token"]
@@ -956,14 +1187,7 @@ def _do_refresh(path: str, oauth: dict) -> dict:
         oauth["refreshToken"] = resp["refresh_token"]
     if resp.get("expires_in"):
         oauth["expiresAt"] = int(time.time() * 1000) + int(resp["expires_in"]) * 1000
-    try:
-        doc = _load_doc(path)
-        if not isinstance(doc, dict):
-            doc = {}
-    except Exception:
-        doc = {}
-    doc["claudeAiOauth"] = oauth
-    _save_doc(path, doc)
+    _persist_oauth(path, oauth)
     return oauth
 
 
@@ -983,9 +1207,11 @@ def _exchange_code(code: str, verifier: str) -> dict:
     }
     if state:
         payload["state"] = state
-    status, resp = _http_json("POST", TOKEN_URL, body=payload)
+    status, resp = _http_json("POST", TOKEN_URL, body=payload,
+                              honor_retry_after=False)
     if status in (400, 415, 422):
-        status, resp = _http_json("POST", TOKEN_URL, form=payload)
+        status, resp = _http_json("POST", TOKEN_URL, form=payload,
+                                  honor_retry_after=False)
     if status != 200 or not isinstance(resp, dict) or "access_token" not in resp:
         raise RuntimeError(f"code exchange failed (HTTP {status}): {resp}")
     return resp
@@ -999,21 +1225,33 @@ def _save_new_credential(resp: dict, path: str) -> None:
     }
     if resp.get("scope"):
         oauth["scopes"] = resp["scope"].split()
-    try:
-        doc = _load_doc(path)
-        if not isinstance(doc, dict):
-            doc = {}
-    except Exception:
-        doc = {}
-    doc["claudeAiOauth"] = oauth
-    _save_doc(path, doc)
+    _persist_oauth(path, oauth, create=True)
+
+
+_shutting_down = False
+
+
+def _wait_for_token_writes(timeout: float = 45.0) -> None:
+    """Block exit until no refresh is mid-flight (it holds _lock from the token
+    request through the save, worst case two 20 s requests), and stop any new
+    refresh from starting, so quitting can't strand a rotated token."""
+    global _shutting_down
+    _shutting_down = True
+    if _lock.acquire(timeout=timeout):
+        _lock.release()
 
 
 def _get_token(path: str, force: bool = False) -> str:
     with _lock:
-        oauth = _load_oauth(path)
+        if path in _pending_oauth:
+            oauth = _pending_oauth[path]
+            _persist_oauth(path, oauth)             # retry the failed save
+        else:
+            oauth = _load_oauth(path)
         near_expiry = (oauth.get("expiresAt", 0) - time.time() * 1000) < 300_000
         if force or near_expiry:
+            if _shutting_down:
+                raise RuntimeError("shutting down")
             oauth = _do_refresh(path, oauth)
         return oauth["accessToken"]
 
@@ -1029,6 +1267,155 @@ def _to_minutes(resets_at) -> int | None:
         return max(0, int((ts - time.time()) // 60))
     except Exception:
         return None
+
+
+def _plan_from_profile(prof: dict) -> str:
+    """Short plan badge ("MAX5x", "MAX20x", "PRO", "TEAM", ...) from /profile."""
+    acct = prof.get("account") or {}
+    org = prof.get("organization") or {}
+    tier = str(org.get("rate_limit_tier") or "").lower()
+    otype = str(org.get("organization_type") or "").lower()
+    if "max" in otype or "max" in tier or acct.get("has_claude_max"):
+        m = re.search(r"(\d+)x", tier)
+        return f"MAX{m.group(1)}x" if m else "MAX"
+    if "pro" in otype or acct.get("has_claude_pro"):
+        return "PRO"
+    if otype:
+        return otype.replace("claude_", "").upper()[:6]
+    return "FREE"
+
+
+def _account_plan(path: str, headers: dict) -> str:
+    """Plan badge for an account, cached in its credential file for PLAN_TTL_S."""
+    try:
+        doc = _load_doc(path)
+        cached = doc.get("plan") if isinstance(doc, dict) else None
+    except Exception:
+        cached = None
+    if (isinstance(cached, dict) and cached.get("badge")
+            and time.time() - float(cached.get("checked_at") or 0) < PLAN_TTL_S):
+        return cached["badge"]
+    try:
+        status, prof = _http_json("GET", PROFILE_URL, headers=headers,
+                                  honor_retry_after=False)
+        if status == 200 and isinstance(prof, dict):
+            badge = _plan_from_profile(prof)
+            uuid = (prof.get("account") or {}).get("uuid") or ""
+            _update_cred_doc(path, lambda d: _stamp_identity(d, uuid, badge))
+            return badge
+    except Exception:
+        pass
+    return cached.get("badge", "") if isinstance(cached, dict) else ""
+
+
+def _identify(token: str) -> tuple[str, str]:
+    """(account uuid, plan badge) for a fresh token; blanks if /profile fails."""
+    try:
+        status, prof = _http_json("GET", PROFILE_URL, headers={
+            "Authorization": f"Bearer {token}", "anthropic-beta": BETA_HEADER},
+            honor_retry_after=False)
+        if status == 200 and isinstance(prof, dict):
+            return ((prof.get("account") or {}).get("uuid") or "",
+                    _plan_from_profile(prof))
+    except Exception:
+        pass
+    return "", ""
+
+
+def _stamp_identity(doc: dict, uuid: str, plan: str) -> None:
+    if uuid:
+        doc["accountUuid"] = uuid
+    if plan:
+        doc["plan"] = {"badge": plan, "checked_at": time.time()}
+
+
+def _credential_path_for(uuid: str, plan: str, add: bool) -> str:
+    """Where a new sign-in is saved.
+
+    Signing in to an account we already have replaces that file (so re-auth on
+    the Pro account never clobbers the Max one). Otherwise "Add account" gets a
+    new credentials-<plan>.json and plain re-auth keeps using credentials.json.
+    """
+    files = _cred_files()
+    default = os.path.join(CRED_DIR, "credentials.json")
+
+    def stamped(f: str) -> str:
+        try:
+            return _load_doc(f).get("accountUuid") or ""
+        except Exception:
+            return ""
+
+    if uuid:
+        for f in files:
+            if stamped(f) == uuid:
+                return f
+    if not files:
+        return default
+    if not add:
+        if not uuid and len(files) > 1:
+            # Can't tell which account this is; guessing could overwrite the
+            # other account's tokens.
+            raise RuntimeError("couldn't identify the account (profile lookup "
+                               "failed). Try again in a minute.")
+        # Only reuse a file we can't prove belongs to someone else: the lone
+        # file, and only if it isn't stamped with a different account.
+        if len(files) == 1 and not (uuid and stamped(files[0])):
+            return files[0]
+        # Otherwise fall through and save it as a new account.
+    slug = re.sub(r"[^a-z]", "", (plan or "account").lower()) or "account"
+    path, n = os.path.join(CRED_DIR, f"credentials-{slug}.json"), 2
+    while os.path.exists(path):
+        path = os.path.join(CRED_DIR, f"credentials-{slug}-{n}.json")
+        n += 1
+    return path
+
+
+def _limit_label(lim: dict) -> str:
+    kind = lim.get("kind") or ""
+    if kind == "session":
+        return "SESSION"
+    if kind == "weekly_all":
+        return "WEEKLY"
+    scope = lim.get("scope") or {}
+    names = [((scope.get(k) or {}).get("display_name") or "").strip()
+             for k in ("model", "surface")]
+    name = " ".join(n for n in names if n)
+    return (name or kind.replace("_", " ")).upper()
+
+
+def _extra_limits(resp: dict) -> list[dict]:
+    """Model/surface-scoped windows beyond session + weekly (e.g. Max's per-model
+    weekly cap) — the same rows claude.ai's usage page shows.
+
+    Prefers the server's `limits` list; falls back to the legacy
+    seven_day_opus / seven_day_sonnet fields on older responses.
+    """
+    extras = []
+    limits = resp.get("limits")
+    if isinstance(limits, list):
+        for lim in limits:
+            if not isinstance(lim, dict) or lim.get("kind") in ("session", "weekly_all"):
+                continue
+            try:
+                badge = {"weekly": "7d", "session": "5h"}.get(lim.get("group"), "")
+                extras.append({
+                    "label": _limit_label(lim)[:12],
+                    "badge": badge,
+                    "pct":   max(0, min(100, int(round(float(lim.get("percent") or 0))))),
+                    "min":   _to_minutes(lim.get("resets_at")),
+                })
+            except Exception:
+                continue            # skip a malformed row, keep the account
+        return extras
+    for key, label in (("seven_day_opus", "OPUS"), ("seven_day_sonnet", "SONNET")):
+        w = resp.get(key)
+        if isinstance(w, dict):
+            extras.append({
+                "label": label, "badge": "7d",
+                "pct":   max(0, min(100, int(round(w.get("utilization") or 0)))),
+                "min":   _to_minutes(w.get("resets_at")),
+            })
+    return extras
 
 
 def fetch_all_accounts() -> list[dict]:
@@ -1095,8 +1482,11 @@ def _fetch_claude_accounts() -> list[dict]:
             if active:
                 if cfg["session_started"]:
                     _save_account_settings(path, session_started=False)
-            elif cfg["auto_start"] and not cfg["session_started"]:
-                if _start_session(token):
+            elif (cfg["auto_start"] and not cfg["session_started"]
+                  and time.time() - _start_failed_at.get(path, 0) > START_RETRY_S):
+                if not _start_session(token):
+                    _start_failed_at[path] = time.time()
+                else:
                     status, resp = _http_json("GET", USAGE_URL, headers=headers)
                     if status == 200 and isinstance(resp, dict):
                         fh = resp.get("five_hour") or {}
@@ -1113,6 +1503,8 @@ def _fetch_claude_accounts() -> list[dict]:
                 "session_min": _to_minutes(fh.get("resets_at")),
                 "weekly_pct":  w_pct,
                 "weekly_min":  _to_minutes(sd.get("resets_at")),
+                "extra":       _extra_limits(resp),
+                "plan":        _account_plan(path, headers),
                 "active":      active,
                 "ok":          True,
                 "error":       "",
@@ -1285,12 +1677,16 @@ _CUBE_FACES = [
 ]
 
 
-def _cube_shade(shade: float, ok: bool) -> QColor:
+def _cube_shade(shade: float, ok: bool, light_bg: bool = False) -> QColor:
+    if light_bg and ok:
+        v = int(40 + 80 * (1.0 - shade))      # lit faces darkest → still reads 3D
+        return QColor(v, v, v + 6)
     r, gc, b = (236, 236, 242) if ok else (250, 92, 88)
     return QColor(int(r * shade), int(gc * shade), int(b * shade))
 
 
-def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float, size: float = 3.9) -> None:
+def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float, size: float = 3.9,
+                      light_bg: bool = False) -> None:
     """Cursor's cube logo, spinning about its vertical axis (Claude's spark analog).
 
     `size` is the cube half-extent in pixels (dashboard default 3.9). After the
@@ -1328,7 +1724,8 @@ def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float, size: float = 3.9) -> 
 
     faces.sort(key=lambda f: f[0])    # painter's algorithm: far first
     for _depth, pts, shade in faces:
-        col = C_TEXT if blip else _cube_shade(shade, ok)
+        col = ((C_TEXT if not light_bg else QColor(0, 0, 0)) if blip
+               else _cube_shade(shade, ok, light_bg))
         g.fill_triangle(pts[0][0], pts[0][1], pts[1][0], pts[1][1],
                         pts[2][0], pts[2][1], col)
         g.fill_triangle(pts[0][0], pts[0][1], pts[2][0], pts[2][1],
@@ -1370,18 +1767,52 @@ def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: flo
     _draw_meter(g, 6, y0 + 40, 148, 7, 0 if idle else pct, meter_col)
 
 
+EXTRA_ROW_H = 32                           # logical px per model-scoped limit row
+
+
+def _plan_badge_x(plan: str) -> int:
+    return 130 - (_text_w(plan, 1) + 5)    # right-aligned just left of the poll ring
+
+
+def _header_chars(plan: str) -> int:
+    """Account-name chars that fit in the header beside the plan badge."""
+    if not plan:
+        return 21
+    return max(0, (_plan_badge_x(plan) - 8) // 6)
+
+
+def _draw_extra_row(g: Gfx, y0, row: dict, ok: bool, brand: QColor) -> None:
+    """Compact row for a scoped limit (e.g. Max's per-model weekly cap)."""
+    pct = row.get("pct", 0)
+    col = _pct_color(pct) if ok else C_DIM
+    label = row.get("label") or "LIMIT"
+    g.text(label, 6, y0, brand if ok else C_DIM, 1)
+    if row.get("badge"):
+        _draw_badge(g, 6 + _text_w(label, 1) + 5, y0 - 1, row["badge"], C_DIM)
+    rs = _fmt_dur(row.get("min") or 0)
+    rw = _text_w(rs, 1)
+    g.text(rs, 154 - rw, y0, C_TEXT if ok else C_DIM, 1)
+    _draw_clock(g, 154 - rw - 7, y0 + 3, brand if ok else C_DIM)
+    ps = f"{pct}%"
+    g.text(ps, 6, y0 + 11, col, 2)
+    _draw_meter(g, 58, y0 + 15, 96, 7, pct,
+                (C_RED if pct >= 85 else col) if ok else None)
+
+
 def _draw_dashboard(g: Gfx, d: dict, t: float,
-                    poll_frac: float = 0.0, fetching: bool = False) -> None:
+                    poll_frac: float = 0.0, fetching: bool = False,
+                    extra_rows: int = 0) -> None:
     s, w = d["session"], d["weekly"]
     acct = d.get("account") or "CLAUDE USAGE"
-    if len(acct) > 23:
-        acct = acct[:23]
     ok = d.get("ok", True)
 
     cursor = d.get("kind") == "cursor"
     brand = C_CURSOR if cursor else C_CLAUDE
 
-    g.text(acct, 5, 2, C_DIM if ok else C_RED, 1)
+    plan = d.get("plan") if ok else ""
+    if plan:
+        _draw_badge(g, _plan_badge_x(plan), 1, plan, brand)
+    g.text(acct[:_header_chars(plan) if ok else 23], 5, 2, C_DIM if ok else C_RED, 1)
     g.draw_poll_ring(138, 6, 5, poll_frac, fetching, t)
     if cursor:
         _draw_cursor_mark(g, 152, 6, ok, t)
@@ -1400,6 +1831,111 @@ def _draw_dashboard(g: Gfx, d: dict, t: float,
 
     _draw_metric_card(g, 75, w.get("label", "WEEKLY"), w.get("badge", "7d"), w["pct"],
                       w.get("resets_in_min", 0), ok, t, brand)
+
+    # Model-scoped limits (e.g. Max's FABLE weekly) below the two main cards.
+    extras = d.get("extra") or []
+    for i in range(min(extra_rows, len(extras))):
+        y0 = 128 + i * EXTRA_ROW_H + 3
+        g.draw_fast_hline(6, y0 - 4, 148, C_TRACK)
+        _draw_extra_row(g, y0, extras[i], ok, brand)
+
+
+# ── Stacked view: every account at once (used when there are 2+ accounts) ───
+
+STACK_TOP   = 16                           # below the title bar + accent line
+STACK_HEAD  = 12                           # account name / plan badge row
+STACK_ROW   = 12                           # one limit row
+STACK_GAP   = 6                            # padding + divider between accounts
+
+
+def _fmt_short(minutes) -> str:
+    if not minutes or minutes <= 0:
+        return "--"
+    d, rem = divmod(int(minutes), 1440)
+    h, m = divmod(rem, 60)
+    if d:
+        return f"{d}d{h}h"
+    return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def _stack_section(a: dict) -> dict:
+    """Account dict (from the fetchers) → header + limit rows for the stack."""
+    cursor = a.get("kind") == "cursor"
+    ok = a.get("ok", False)
+    sec = {"name": a.get("label") or "", "plan": a.get("plan") or "",
+           "cursor": cursor, "ok": ok, "error": a.get("error") or "", "rows": []}
+    if not ok:
+        return sec
+    if cursor:
+        sec["rows"] = [("AUTO", a.get("session_pct", 0), a.get("session_min")),
+                       ("API",  a.get("weekly_pct", 0),  a.get("weekly_min"))]
+        return sec
+    active = a.get("active", False)
+    sec["rows"] = [("SESSION", a.get("session_pct", 0) if active else -1,
+                    a.get("session_min") if active else None),
+                   ("WEEKLY", a.get("weekly_pct", 0), a.get("weekly_min"))]
+    sec["rows"] += [(x.get("label", ""), x.get("pct", 0), x.get("min"))
+                    for x in a.get("extra") or []]
+    return sec
+
+
+def _stack_height(sections: list[dict]) -> int:
+    h = STACK_TOP
+    for s in sections:
+        h += STACK_HEAD + STACK_ROW * max(1, len(s["rows"])) + STACK_GAP
+    return h - STACK_GAP + 4
+
+
+def _draw_stacked(g: Gfx, d: dict, t: float,
+                  poll_frac: float = 0.0, fetching: bool = False) -> None:
+    sections = d["sections"]
+    any_ok = any(s["ok"] for s in sections)
+    title = d.get("notice") or "TOKEN MAXXING"
+    g.text(title[:22], 5, 2, C_DIM, 1)
+    # No corner logo here: every account row already has its own spark/cube.
+    g.draw_poll_ring(150, 6, 5, poll_frac, fetching, t)
+    g.draw_fast_hline(0, 12, 160, C_ACCENT if any_ok else C_RED)
+
+    y = STACK_TOP
+    for i, s in enumerate(sections):
+        if i:
+            g.draw_fast_hline(6, y - STACK_GAP // 2 - 1, 148, C_TRACK)
+        brand = C_CURSOR if s["cursor"] else C_CLAUDE
+        ok = s["ok"]
+        name_chars = 24
+        if s["plan"] and ok:
+            bx = 154 - (_text_w(s["plan"], 1) + 5)
+            _draw_badge(g, bx, y, s["plan"], C_DIM)
+            name_chars = max(0, (bx - 10) // 6)
+        # Same-size animated mark beside every name: Cursor cube / Claude spark.
+        if s["cursor"]:
+            _draw_cursor_mark(g, 9, y + 4, ok, t, size=2.4)
+        else:
+            blip = ok and (int(time.time() * 1000) % 5000) < 450
+            col = C_CLAUDE if ok else C_RED
+            _draw_spark(g, 9, y + 4, t, 5.4 if blip else 5.0, 1.6, 6, col,
+                        C_TEXT if blip else col)
+        g.text(s["name"][:name_chars - 2], 17, y + 1, brand if ok else C_RED, 1)
+        y += STACK_HEAD
+
+        if not ok:
+            g.text((s["error"] or "error")[:24], 6, y + 1, C_DIM, 1)
+            y += STACK_ROW + STACK_GAP
+            continue
+        for label, pct, mins in s["rows"]:
+            idle = pct < 0
+            col = C_DIM if idle else _pct_color(pct)
+            g.text(label[:7], 6, y + 1, C_DIM, 1)
+            ps = "--" if idle else f"{pct}%"
+            g.text(ps, 76 - _text_w(ps, 1), y + 1, col, 1)
+            g.fill_rect(80, y + 2, 36, 5, C_TRACK)
+            fw = 0 if idle else round(36 * max(0, min(100, pct)) / 100)
+            if fw:
+                g.fill_rect(80, y + 2, fw, 5, C_RED if pct >= 85 else col)
+            rs = "idle" if idle else _fmt_short(mins)
+            g.text(rs, 154 - _text_w(rs, 1), y + 1, C_DIM if idle else C_TEXT, 1)
+            y += STACK_ROW
+        y += STACK_GAP
 
 
 def _draw_boot(g: Gfx, status: str, t: float) -> None:
@@ -1424,96 +1960,96 @@ def _draw_boot(g: Gfx, status: str, t: float) -> None:
     g.text(status, (160 - stw) // 2, 114, C_RED if err else C_DIM, 1)
 
 
-def _draw_mini(p: QPainter, d: dict, t: float, w: int, h: int) -> None:
-    """One-line taskbar strip: S 38%  W 62% (or A / P) plus spark/cube.
-
-    Columns are fixed (label + '100%' + logo slot) so Claude ↔ Cursor and
-    9% ↔ 100% don't shift the layout.
-    """
-    s, wk = d.get("session") or {}, d.get("weekly") or {}
-    ok = d.get("ok", True)
-    cursor = d.get("kind") == "cursor"
-    idle = not s.get("active", True)
-    s_pct = s.get("pct", 0)
-    w_pct = wk.get("pct", 0)
-    s_lab, w_lab = ("A", "P") if cursor else ("S", "W")
-
-    def col_for(pct, is_idle=False):
-        if not ok:
-            return C_DIM
-        if is_idle:
-            return C_DIM
-        return _pct_color(int(pct))
-
-    def txt(pct, is_idle):
-        if is_idle:
-            return "--"
-        try:
-            return str(max(0, min(100, int(pct))))
-        except (TypeError, ValueError):
-            return "--"
-
-    s_txt = txt(s_pct, idle)
-    w_txt = txt(w_pct, False)
-    s_col = col_for(s_pct, idle)
-    w_col = col_for(w_pct, False)
-    lab_col = C_DIM if ok else C_RED
-
-    font_px = max(10, min(14, h - 10))
+def _mini_font(h: int) -> QFont:
     f = QFont("Segoe UI")
-    f.setPixelSize(font_px)
+    f.setPixelSize(max(9, min(12, (h - 8) // 3)))
     f.setWeight(QFont.Weight.DemiBold)
+    return f
+
+
+def _mini_groups(accounts: list[dict]) -> list[dict]:
+    """One strip group per account: logo, short tag, and two value lines."""
+    groups = []
+    for a in accounts:
+        cursor = a.get("kind") == "cursor"
+        ok = bool(a.get("ok"))
+        active = a.get("active", False)
+        if cursor:
+            tag = "CUR"
+            lines = [("A", a.get("session_pct", 0)), ("P", a.get("weekly_pct", 0))]
+        else:
+            tag = re.sub(r"[^A-Z]", "", (a.get("plan") or "").upper())[:3]                 or (a.get("label") or "?")[:3].upper()
+            lines = [("S", a.get("session_pct", 0) if active else -1),
+                     ("W", a.get("weekly_pct", 0))]
+        groups.append({"cursor": cursor, "ok": ok, "tag": tag, "lines": lines,
+                       "name": a.get("label") or ""})
+    return groups
+
+
+MINI_PAD, MINI_GAP, MINI_LOGO = 4, 7, 13
+
+
+def _mini_width(groups: list[dict], h: int) -> int:
+    fm = QFontMetrics(_mini_font(h))
+    val_w = fm.horizontalAdvance("100")
+    n = max(1, len(groups))
+    return MINI_PAD * 2 + n * (MINI_LOGO + 3 + val_w) + (n - 1) * MINI_GAP
+
+
+def _draw_mini(p: QPainter, groups: list[dict], t: float, w: int, h: int,
+               update: bool = False, bg: QColor | None = None) -> None:
+    """Taskbar strip: every account side by side. Logo + plan tag, then two
+    numbers: top = session (Cursor: Auto), bottom = weekly (Cursor: API)."""
+    light = _is_light(bg)
+    dim = QColor(96, 96, 104) if light else C_DIM
+    f = _mini_font(h)
     p.setFont(f)
     fm = QFontMetrics(f)
-
-    pad_l = 12 if d.get("update") else 8
-    pad_r = 6
-    pair_gap = 10
-    logo_gap = 8
-    label_gap = 4
-    label_w = max(fm.horizontalAdvance(c) for c in "SWAP")
-    value_w = fm.horizontalAdvance("100%")
-    pair_w = label_w + label_gap + value_w
-    logo_slot = max(16, min(20, h - 8))
-
-    x = pad_l
-    text_h = h
-    align_l = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    val_w = fm.horizontalAdvance("100")
+    line_h = fm.height()
+    top = (h - 2 * line_h) / 2
+    tag_f = QFont("Segoe UI")
+    tag_f.setPixelSize(max(7, min(8, h // 6)))
+    tag_f.setWeight(QFont.Weight.Bold)
     align_r = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    align_c = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
 
-    def draw_pair(label, value, vcol):
-        nonlocal x
-        p.setPen(lab_col)
-        p.drawText(QRect(x, 0, label_w, text_h), align_l, label)
-        vx = x + label_w + label_gap
-        p.setPen(vcol)
-        shown = value if value == "--" else f"{value}%"
-        p.drawText(QRect(vx, 0, value_w, text_h), align_r, shown)
-        x += pair_w
-
-    draw_pair(s_lab, s_txt, s_col)
-    x += pair_gap
-    draw_pair(w_lab, w_txt, w_col)
-
-    if d.get("update"):
+    if update:
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C_ACCENT)
         p.drawRoundedRect(QRectF(2, 5, 3, max(8, h - 10)), 1.5, 1.5)
 
-    cx = x + logo_gap + logo_slot / 2
-    cy = h / 2
-    # Same occupied radius for spark rays and the solid cube.
-    logo_r = logo_slot * 0.46
+    x = MINI_PAD
     g = Gfx(p)
-    if cursor:
-        # Projected cube radius ≈ 1.75×half-extent; match spark outer radius.
-        _draw_cursor_mark(g, cx, cy, ok, t, size=logo_r / 1.75)
-    else:
-        blip = ok and (int(time.time() * 1000) % 5000) < 450
-        spark_col = C_CLAUDE if ok else C_RED
-        _draw_spark(g, cx, cy, t, logo_r if blip else logo_r * 0.92,
-                    max(1.5, logo_r * 0.32), 6, spark_col,
-                    C_TEXT if blip else spark_col)
+    for grp in groups or [{"cursor": False, "ok": True, "tag": "",
+                           "lines": [("S", -1), ("W", -1)], "name": ""}]:
+        ok = grp["ok"]
+        # Logo in the upper part, plan/source tag underneath.
+        cx, cy = x + MINI_LOGO / 2, h * 0.38
+        r = MINI_LOGO * 0.46
+        if grp["cursor"]:
+            _draw_cursor_mark(g, cx, cy, ok, t, size=r / 1.75, light_bg=light)
+        else:
+            blip = ok and (int(time.time() * 1000) % 5000) < 450
+            col = C_CLAUDE if ok else C_RED
+            _draw_spark(g, cx, cy, t, r if blip else r * 0.92,
+                        max(1.5, r * 0.32), 6, col, C_TEXT if blip else col)
+        p.setFont(tag_f)
+        p.setPen(dim)
+        p.drawText(QRectF(x - 6, h * 0.62, MINI_LOGO + 12, h * 0.3), align_c, grp["tag"])
+        p.setFont(f)
+
+        vx = x + MINI_LOGO + 3
+        for i, (_lab, pct) in enumerate(grp["lines"]):
+            y = top + i * line_h
+            if not ok or pct is None or pct < 0:
+                txt, col = "--", dim
+            else:
+                pct = max(0, min(100, int(pct)))
+                txt, col = str(pct), _pct_color(pct, light)
+            p.setPen(col)
+            p.drawText(QRectF(vx, y, val_w, line_h), align_r, txt)
+        x = vx + val_w + MINI_GAP
 
 
 class DashboardCanvas(QWidget):
@@ -1529,6 +2065,7 @@ class DashboardCanvas(QWidget):
         self._last_fetch_at: float | None = None
         self._fetching = False
         self._scale = SCALE_DEFAULT
+        self._logical_h = 128
         self.set_scale(scale)
         tm = QTimer(self)
         tm.timeout.connect(self._tick)
@@ -1536,8 +2073,20 @@ class DashboardCanvas(QWidget):
 
     def set_scale(self, scale: float) -> None:
         self._scale = _clamp_scale(scale)
-        self.setFixedSize(round(160 * self._scale), round(128 * self._scale))
+        self.setFixedSize(round(160 * self._scale),
+                          round(self.logical_height() * self._scale))
         self.update()
+
+    def logical_height(self) -> int:
+        return self._logical_h
+
+    def set_logical_height(self, h: int) -> bool:
+        """Fit the content (extra limit rows / stacked accounts); True if changed."""
+        if h == self._logical_h:
+            return False
+        self._logical_h = h
+        self.set_scale(self._scale)
+        return True
 
     def set_boot(self, status: str) -> None:
         self._mode = "boot"
@@ -1578,9 +2127,11 @@ class DashboardCanvas(QWidget):
         g = Gfx(p)
         if self._mode == "boot":
             _draw_boot(g, self._boot_status, self._t)
+        elif self._dash and "sections" in self._dash:
+            _draw_stacked(g, self._dash, self._t, self._poll_frac(), self._fetching)
         elif self._dash:
-            _draw_dashboard(g, self._dash, self._t,
-                            self._poll_frac(), self._fetching)
+            _draw_dashboard(g, self._dash, self._t, self._poll_frac(), self._fetching,
+                            len(self._dash.get("extra") or []))
         p.restore()
 
 
@@ -1680,7 +2231,15 @@ class FetchThread(QThread):
     done = pyqtSignal(list)
 
     def run(self):
-        self.done.emit(fetch_all_accounts())
+        # Always emit: _fetching is only cleared by `done`, so a stray
+        # exception here would otherwise stop polling for good.
+        try:
+            accounts = fetch_all_accounts()
+        except Exception as exc:
+            accounts = [{"label": "Error", "ok": False, "error": str(exc)[:60],
+                         "session_pct": 0, "session_min": None,
+                         "weekly_pct": 0, "weekly_min": None, "active": False}]
+        self.done.emit(accounts)
 
 
 class CursorFetchThread(QThread):
@@ -1702,17 +2261,21 @@ class CursorFetchThread(QThread):
 class AuthThread(QThread):
     done = pyqtSignal(bool, str)   # (success, error_message)
 
-    def __init__(self, parent, code: str, verifier: str):
+    def __init__(self, parent, code: str, verifier: str, add: bool = False):
         super().__init__(parent)
         self._code     = code
         self._verifier = verifier
+        self._add      = add
 
     def run(self):
         try:
             resp = _exchange_code(self._code, self._verifier)
             os.makedirs(CRED_DIR, exist_ok=True)
-            path = os.path.join(CRED_DIR, "credentials.json")
+            uuid, plan = _identify(resp["access_token"])
+            path = _credential_path_for(uuid, plan, self._add)
             _save_new_credential(resp, path)
+            if uuid or plan:
+                _update_cred_doc(path, lambda d: _stamp_identity(d, uuid, plan))
             self.done.emit(True, "")
         except Exception as e:
             self.done.emit(False, str(e))
@@ -1754,9 +2317,10 @@ class OverlayWindow(QWidget):
         self._tut_step:     int             = 0
         self._exiting:      bool            = False
         self._applying_chrome: bool         = False
-        self._click_timer = QTimer(self)
-        self._click_timer.setSingleShot(True)
-        self._click_timer.timeout.connect(self._cycle_from_click)
+        self._mini_offset:  int             = load_app_config()["mini_offset"]
+        self._mini_bg:      QColor | None   = None
+        self._mini_backdrop: QImage | None  = None
+        self._mini_drag:    tuple | None    = None
 
         self._init_window()
         self._build_ui()
@@ -1770,18 +2334,44 @@ class OverlayWindow(QWidget):
     def _full_size(self) -> tuple[int, int]:
         pad = PANEL_PAD
         scale = getattr(self, "_scale", SCALE_DEFAULT)
-        h = round(128 * scale) + pad * 2
+        canvas = getattr(self, "_canvas", None)
+        w = round(160 * scale) + pad * 2
+        h = round((canvas.logical_height() if canvas else 128) * scale) + pad * 2
+        stack = getattr(self, "_stack", None)
+        if stack is not None and stack.currentIndex() in (1, 2):
+            # Sign-in / Settings are Qt forms, not the scaled canvas: give
+            # them room even at small sizes.
+            w, h = max(w, FORM_MIN_W), max(h, FORM_MIN_H)
         if (not self._compact
                 and getattr(self, "_update_banner", None) is not None
                 and self._update_banner.isVisible()):
             h += UPDATE_BANNER_H
-        return round(160 * scale) + pad * 2, h
+        return w, h
 
     def _apply_full_size(self) -> None:
         if self._compact:
             return
         fw, fh = self._full_size()
         self.setFixedSize(fw, fh)
+        self._keep_on_screen()
+
+    def _keep_on_screen(self) -> None:
+        """Pull the widget back inside a visible screen (monitor unplugged,
+        many accounts making it tall)."""
+        if self._compact:
+            return
+        geo = self.frameGeometry()
+        screen = (QGuiApplication.screenAt(geo.center())
+                  or QGuiApplication.screenAt(geo.topLeft())
+                  or QGuiApplication.primaryScreen())
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        x = min(max(geo.x(), avail.x()), avail.x() + avail.width() - geo.width())
+        y = min(max(geo.y(), avail.y()), avail.y() + avail.height() - geo.height())
+        x, y = max(x, avail.x()), max(y, avail.y())
+        if (x, y) != (geo.x(), geo.y()):
+            self.move(x, y)
 
     def _set_scale(self, scale: float, persist: bool = True) -> None:
         scale = _clamp_scale(scale)
@@ -1856,16 +2446,19 @@ class OverlayWindow(QWidget):
         self._ensure_dock_timers()
         if self._compact:
             if not self._mini_tick.isActive():
-                self._mini_tick.start(33)
+                self._mini_tick.start(66)
             self._dock_mini()
             return
         self._full_pos = self.pos()
         self._compact = True
         self._update_banner.hide()
         self._stack.hide()
+        # Drop the full-mode fixed size; the dock sizes the strip natively.
+        self.setMinimumSize(1, 1)
+        self.setMaximumSize(16777215, 16777215)
         self._apply_chrome(compact=True)
         self._dock_timer.start(DOCK_MS)
-        self._mini_tick.start(33)
+        self._mini_tick.start(66)
         self._dock_mini()
         self._mini_frame()
 
@@ -1889,6 +2482,7 @@ class OverlayWindow(QWidget):
         self._apply_full_size()
         if self._full_pos is not None:
             self.move(self._full_pos)
+        self._keep_on_screen()
         self.update()
 
     def _dock_mini(self) -> None:
@@ -1899,13 +2493,31 @@ class OverlayWindow(QWidget):
         if not self.isVisible():
             self.show()
         rect = _mini_dock_rect()
-        if rect is None or not rect.isValid():
-            w, h = MINI_W, MINI_H
-        else:
-            w, h = rect.width(), rect.height()
-        if self.width() != w or self.height() != h:
-            self.setFixedSize(w, h)
-        _win_embed_tray(int(self.winId()), True)
+        h = rect.height() if rect is not None and rect.isValid() else MINI_H
+        w = _mini_width(_mini_groups(self._accounts), h)
+        tray_hwnd, _notify = _win_tray_windows()
+        trect = _win_window_rect(tray_hwnd) if tray_hwnd else None
+        if trect is None:
+            # No taskbar to dock into: plain floating strip.
+            if self.width() != w or self.height() != h:
+                self.setFixedSize(w, h)
+            return
+        # Size the tray child in native pixels (see _win_embed_tray).
+        dpr = (trect[3] - trect[1]) / max(1, h) if (trect[2] - trect[0]) >= (
+            trect[3] - trect[1]) else (self.devicePixelRatioF() or 1.0)
+        nrect = _win_window_rect(_notify) if _notify else None
+        if nrect:
+            # Can't be dragged past the far end of the taskbar.
+            room = (nrect[0] - trect[0]) - round(w * dpr)
+            self._mini_offset = max(0, min(self._mini_offset, room))
+        _win_embed_tray(int(self.winId()), True,
+                        size=(round(w * dpr), round(h * dpr)),
+                        offset=self._mini_offset)
+        self._bg_ticks = (getattr(self, "_bg_ticks", 0) + 1) % 16
+        if self._bg_ticks == 1 or self._mini_bg is None:
+            img, col = _win_taskbar_backdrop(_win_window_rect(int(self.winId())))
+            if col is not None:
+                self._mini_bg, self._mini_backdrop = col, img
 
     def _init_window(self):
         # FramelessWindowHint + StaysOnTop keeps the floating overlay look.
@@ -1962,6 +2574,7 @@ class OverlayWindow(QWidget):
 
     def closeEvent(self, event):
         self._exiting = True
+        _wait_for_token_writes()
         try:
             _win_embed_tray(int(self.winId()), False, teardown=True)
         except Exception:
@@ -1973,6 +2586,7 @@ class OverlayWindow(QWidget):
 
     def _request_exit(self):
         self._exiting = True
+        _wait_for_token_writes()
         try:
             _win_embed_tray(int(self.winId()), False, teardown=True)
         except Exception:
@@ -2003,6 +2617,7 @@ class OverlayWindow(QWidget):
         self._stack = QStackedWidget(self)
         self._stack.setStyleSheet("background: transparent;")
         root.addWidget(self._stack)
+        self._stack.currentChanged.connect(lambda _i: self._apply_full_size())
 
         self._update_banner = UpdateBanner(self)
         self._update_banner.hide()
@@ -2064,8 +2679,9 @@ class OverlayWindow(QWidget):
 
         alay.addWidget(self._divider(4))
 
-        asub = QLabel("Sign in to view your Claude usage stats")
+        self._lbl_auth_sub = asub = QLabel(AUTH_SUB_DEFAULT)
         asub.setStyleSheet("color: #808098; font-size: 10px; background: transparent;")
+        asub.setWordWrap(True)
         alay.addWidget(asub)
 
         alay.addSpacing(2)
@@ -2131,6 +2747,19 @@ class OverlayWindow(QWidget):
 
         alay.addStretch()
 
+        self._btn_auth_cancel = QPushButton("Cancel")
+        self._btn_auth_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_auth_cancel.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.08); color: #C8C8D8;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 7px; font-size: 11px; font-weight: 600; padding: 6px 12px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.14); }
+        """)
+        self._btn_auth_cancel.clicked.connect(self._cancel_auth)
+        alay.addWidget(self._btn_auth_cancel)
+
     # Page 2 — per-account settings ───────────────────────────────────────────
 
     def _build_settings_page(self):
@@ -2152,19 +2781,35 @@ class OverlayWindow(QWidget):
         slay.addWidget(stitle)
         slay.addWidget(self._divider(1))
 
-        # ── Per-account section (Claude only; hidden for Cursor) ────────────
+        # ── Claude accounts: pick one to edit, add more, remove ─────────────
+        acclbl = QLabel("CLAUDE ACCOUNTS")
+        acclbl.setStyleSheet(sub_style + " font-weight: 700;")
+        slay.addWidget(acclbl)
+
         self._sett_account_box = QWidget()
         self._sett_account_box.setStyleSheet("background: transparent;")
         abox = QVBoxLayout(self._sett_account_box)
         abox.setContentsMargins(0, 0, 0, 0)
         abox.setSpacing(4)
 
-        nlbl = QLabel("Display name")
-        nlbl.setStyleSheet(sub_style)
-        abox.addWidget(nlbl)
+        self._sett_pick = QComboBox()
+        self._sett_pick.setStyleSheet("""
+            QComboBox {
+                background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 6px; color: #EBEBF0;
+                font-size: 11px; padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView {
+                background: #14141C; color: #EBEBF0;
+                selection-background-color: rgba(255,255,255,0.12);
+            }
+        """)
+        self._sett_pick.currentIndexChanged.connect(self._on_settings_pick)
+        abox.addWidget(self._sett_pick)
 
         self._sett_name = QLineEdit()
-        self._sett_name.setPlaceholderText("e.g. Personal, Work…")
+        self._sett_name.setPlaceholderText("Display name (e.g. Personal, Work)")
         self._sett_name.setStyleSheet(self._FIELD_STYLE)
         abox.addWidget(self._sett_name)
 
@@ -2175,6 +2820,34 @@ class OverlayWindow(QWidget):
             "to anchor a new 5h block — same as the desk gadget.")
         abox.addWidget(self._sett_auto)
         slay.addWidget(self._sett_account_box)
+
+        acct_btns = QHBoxLayout()
+        acct_btns.setSpacing(6)
+        self._btn_add_acct = QPushButton("+  Add account")
+        self._btn_add_acct.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add_acct.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.08); color: #C8C8D8;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 7px; font-size: 10px; font-weight: 600; padding: 5px 8px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.14); }
+        """)
+        self._btn_add_acct.clicked.connect(lambda: self._show_auth(add=True))
+        self._btn_rm_acct = QPushButton("Remove")
+        self._btn_rm_acct.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_rm_acct.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.08); color: #C8C8D8;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 7px; font-size: 10px; font-weight: 600; padding: 5px 8px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.14); }
+        """)
+        self._btn_rm_acct.clicked.connect(self._on_remove_account)
+        acct_btns.addWidget(self._btn_add_acct)
+        acct_btns.addWidget(self._btn_rm_acct)
+        slay.addLayout(acct_btns)
 
         # ── Sources section (global) ───────────────────────────────────────
         srclbl = QLabel("SOURCES")
@@ -2189,12 +2862,8 @@ class OverlayWindow(QWidget):
         self._sett_show_cursor.setStyleSheet(chk_style)
         slay.addWidget(self._sett_show_cursor)
 
-        cnlbl = QLabel("Cursor display name")
-        cnlbl.setStyleSheet(sub_style)
-        slay.addWidget(cnlbl)
-
         self._sett_cursor_name = QLineEdit()
-        self._sett_cursor_name.setPlaceholderText("e.g. Cursor, Work Cursor…")
+        self._sett_cursor_name.setPlaceholderText("Cursor display name")
         self._sett_cursor_name.setStyleSheet(self._FIELD_STYLE)
         slay.addWidget(self._sett_cursor_name)
 
@@ -2230,6 +2899,7 @@ class OverlayWindow(QWidget):
         slay.addLayout(btn_row)
 
         self._settings_path: str | None = None
+        self._sett_pending: dict[str, dict] = {}
 
     # Page 3 — first-run tutorial ─────────────────────────────────────────────
 
@@ -2241,12 +2911,12 @@ class OverlayWindow(QWidget):
          "Hold Ctrl and scroll to resize. Try it now.",
          "size"),
         ("The numbers",
-         "SESSION is your 5h block. WEEKLY is 7 days. Cursor cards show "
-         "AUTO / API. Click cycles accounts. Drag moves the widget.",
+         "SESSION is your 5h block, WEEKLY is 7 days; Max adds a per-model "
+         "row. Every account is listed together. Drag moves the widget.",
          None),
         ("Menu and clock",
-         "Right-click for refresh, settings, and re-auth. Minimize to clock "
-         "docks next to the tray. Double-click the strip to expand.",
+         "Right-click to add accounts, refresh, or open Settings. Minimize to clock "
+         "docks it in the taskbar; drag it to any free spot. Double-click to expand.",
          None),
     )
 
@@ -2446,7 +3116,16 @@ class OverlayWindow(QWidget):
         if load_app_config()["compact_mode"]:
             self._enter_mini(persist=False)
 
-    def _show_auth(self):
+    def _cancel_auth(self):
+        self._adding_account = False
+        if _cred_files() or load_app_config()["show_cursor"]:
+            self._show_main()
+
+    def _show_auth(self, add: bool = False):
+        self._adding_account = add
+        self._btn_auth_cancel.setVisible(
+            bool(_cred_files()) or load_app_config()["show_cursor"])
+        self._lbl_auth_sub.setText(AUTH_SUB_ADD if add else AUTH_SUB_DEFAULT)
         self._enter_full(persist=False)
         self._stack.setCurrentIndex(1)
         # Reset form to initial state
@@ -2466,38 +3145,119 @@ class OverlayWindow(QWidget):
             self._enter_mini(persist=False)
 
     def _show_settings(self):
-        # Per-account fields only apply to Claude accounts (those with a path);
+        # Per-account fields apply to the Claude account picked in the combo;
         # the Sources section is global and always shown.
         self._enter_full(persist=False)
-        path = None
-        if self._accounts:
-            path = self._accounts[self._acct_idx].get("path")
-        self._settings_path = path
-        if path:
-            cfg = _account_settings(path)
-            self._sett_name.setText(
-                cfg["name"] or self._accounts[self._acct_idx].get("label", ""))
-            self._sett_auto.setChecked(cfg["auto_start"])
-            self._sett_account_box.show()
-        else:
-            self._sett_account_box.hide()
-
+        current = None
+        if self._accounts and self._acct_idx < len(self._accounts):
+            current = self._accounts[self._acct_idx].get("path")
+        self._sett_pending: dict[str, dict] = {}
+        self._settings_path = None
+        self._populate_account_pick(current)
         app = load_app_config()
         self._sett_show_claude.setChecked(app["show_claude"])
         self._sett_show_cursor.setChecked(app["show_cursor"])
         self._sett_cursor_name.setText(app["cursor_name"])
         self._stack.setCurrentIndex(2)
 
-    def _save_settings(self):
-        if self._settings_path:
+    def _populate_account_pick(self, select_path: str | None) -> None:
+        files = _cred_files()
+        self._sett_pick.blockSignals(True)
+        self._sett_pick.clear()
+        for idx, path in enumerate(files):
+            try:
+                plan = ((_load_doc(path).get("plan") or {}).get("badge") or "")
+            except Exception:
+                plan = ""
+            label = _account_label(path, idx) + (f"  ·  {plan}" if plan else "")
+            self._sett_pick.addItem(label, path)
+        self._sett_pick.blockSignals(False)
+        has = bool(files)
+        self._sett_account_box.setVisible(has)
+        self._btn_rm_acct.setVisible(has)
+        self._btn_rm_acct.setText("Remove")
+        if has:
+            i = files.index(select_path) if select_path in files else 0
+            self._sett_pick.setCurrentIndex(i)
+            self._on_settings_pick(i)
+
+    def _stash_account_fields(self) -> None:
+        path = self._settings_path
+        if path:
+            cfg = _account_settings(path)
             name = self._sett_name.text().strip()
-            _save_account_settings(self._settings_path, name=name,
-                                   auto_start=self._sett_auto.isChecked())
-            if self._accounts and self._acct_idx < len(self._accounts):
-                a = self._accounts[self._acct_idx]
-                if a.get("path") == self._settings_path:
-                    a["label"] = name or _account_label(
-                        self._settings_path, self._acct_idx)
+            auto = self._sett_auto.isChecked()
+            if name == cfg["name"] and auto == cfg["auto_start"]:
+                self._sett_pending.pop(path, None)      # untouched: save nothing
+                return
+            self._sett_pending[self._settings_path] = {
+                "name": self._sett_name.text().strip(),
+                "auto_start": self._sett_auto.isChecked(),
+            }
+
+    def _on_settings_pick(self, _i: int) -> None:
+        self._stash_account_fields()
+        path = self._sett_pick.currentData()
+        self._settings_path = path
+        self._btn_rm_acct.setText("Remove")
+        if not path:
+            return
+        cfg = _account_settings(path)
+        pending = self._sett_pending.get(path)
+        files = _cred_files()
+        self._sett_name.setPlaceholderText(
+            _account_label(path, files.index(path)) if path in files
+            else "Display name")
+        self._sett_name.setText(pending["name"] if pending else cfg["name"])
+        self._sett_auto.setChecked(pending["auto_start"] if pending
+                                   else cfg["auto_start"])
+
+    def _on_remove_account(self) -> None:
+        """Two-click remove: first click arms, second deletes the credential file."""
+        path = self._settings_path
+        if not path:
+            return
+        if self._btn_rm_acct.text() != "Confirm remove":
+            self._btn_rm_acct.setText("Confirm remove")
+            return
+        try:
+            if not _lock.acquire(timeout=45):
+                raise OSError("busy refreshing — try again")
+            try:
+                os.remove(path)
+            finally:
+                _lock.release()
+        except OSError:
+            self._btn_rm_acct.setText("Couldn't remove — retry")
+            return
+        _pending_oauth.pop(path, None)
+        self._sett_pending.pop(path, None)
+        self._settings_path = None
+        self._accounts = [a for a in self._accounts if a.get("path") != path]
+        self._acct_idx = 0
+        _save_usage_cache(accounts=self._accounts)
+        if not _cred_files():
+            self._show_auth()
+            return
+        self._populate_account_pick(None)
+        self._refresh_display()
+
+    def _save_settings(self):
+        self._stash_account_fields()
+        files = _cred_files()
+        edits = [(p, e) for p, e in self._sett_pending.items() if p in files]
+        for path, edit in edits:
+            for a in self._accounts:
+                if a.get("path") == path:
+                    a["label"] = edit["name"] or _account_label(path, files.index(path))
+        if edits:
+            # Write off the GUI thread: _update_cred_doc waits for _lock, which a
+            # token refresh can hold for a while.
+            def write(edits=edits):
+                for path, edit in edits:
+                    _save_account_settings(path, name=edit["name"],
+                                           auto_start=edit["auto_start"])
+            threading.Thread(target=write, name="save-settings").start()
 
         prev = load_app_config()
         show_claude = self._sett_show_claude.isChecked()
@@ -2564,7 +3324,8 @@ class OverlayWindow(QWidget):
         self._btn_browser.setEnabled(False)
         self._lbl_auth_err.hide()
 
-        t = AuthThread(self, code, self._pkce_verifier)
+        t = AuthThread(self, code, self._pkce_verifier,
+                       add=getattr(self, "_adding_account", False))
         t.done.connect(self._on_auth_done)
         t.finished.connect(t.deleteLater)
         t.start()
@@ -2574,7 +3335,9 @@ class OverlayWindow(QWidget):
         self._btn_submit.setText("Submit")
         self._btn_browser.setEnabled(True)
         if ok:
+            self._adding_account = False
             self._show_main()
+            self._trigger_fetch(force=True)
         else:
             self._lbl_auth_err.setText(f"Auth failed: {error}")
             self._lbl_auth_err.show()
@@ -2586,10 +3349,7 @@ class OverlayWindow(QWidget):
         if not hasattr(self, "_poll_timer"):
             self._poll_timer = QTimer(self)
             self._poll_timer.timeout.connect(self._trigger_fetch)
-            self._rotate_timer = QTimer(self)
-            self._rotate_timer.timeout.connect(self._rotate_account)
         self._poll_timer.start(POLL_MS)
-        self._rotate_timer.start(5000)
         self._trigger_fetch()
 
     def _start_update_checks(self) -> None:
@@ -2686,6 +3446,9 @@ class OverlayWindow(QWidget):
 
     def _on_data(self, accounts: list[dict]):
         prev = self._acct_idx
+        # An account removed while this fetch was in flight must not come back.
+        accounts = [a for a in accounts
+                    if not a.get("path") or os.path.exists(a["path"])]
         if _is_rate_limit_payload(accounts) and self._accounts:
             # Keep the last good snapshot instead of painting "Rate limited"
             # over numbers we already have.
@@ -2724,26 +3487,18 @@ class OverlayWindow(QWidget):
             self._acct_idx = 0
         self._refresh_display()
 
-    def _rotate_account(self):
-        if len(self._accounts) > 1:
-            self._acct_idx = (self._acct_idx + 1) % len(self._accounts)
-            self._refresh_display()
-
-    def _go_home(self):
-        self._acct_idx = 0
-        self._refresh_display()
-
-    # ── Display update ────────────────────────────────────────────────────────
-
     def _account_to_dash(self, a: dict, idx: int, cnt: int) -> dict:
         acct = a["label"]
+        plan = a.get("plan") or ""
+        # Header chars left once the plan badge is drawn (see _draw_dashboard).
+        budget = _header_chars(plan) if a["ok"] else 23
         if not a["ok"]:
-            acct = (a.get("error") or acct)[:23]
+            acct = (a.get("error") or acct)[:budget]
         elif cnt > 1:
             suffix = f" {idx + 1}/{cnt}"
-            acct = (acct[: max(0, 23 - len(suffix))] + suffix)[:23]
+            acct = (acct[: max(0, budget - len(suffix))] + suffix)[:budget]
         else:
-            acct = acct[:23]
+            acct = acct[:budget]
         sess_min = a.get("session_min") or 0
         week_min = a.get("weekly_min") or 0
         cursor = a.get("kind") == "cursor"
@@ -2754,6 +3509,8 @@ class OverlayWindow(QWidget):
         return {
             "ok":      a["ok"],
             "account": acct,
+            "plan":    plan,
+            "extra":   a.get("extra") or [],
             "kind":    a.get("kind", "claude"),
             "session": {
                 "label":         s_label,
@@ -2777,12 +3534,24 @@ class OverlayWindow(QWidget):
                 self.update()
             return
 
-        a   = self._accounts[self._acct_idx]
         cnt = len(self._accounts)
-        dash = self._account_to_dash(a, self._acct_idx, cnt)
-        if self._refresh_notice and time.monotonic() < self._refresh_notice_until:
-            dash["account"] = self._refresh_notice[:23]
-            dash["ok"] = True
+        self._acct_idx = min(max(0, self._acct_idx), cnt - 1)
+        a   = self._accounts[self._acct_idx]
+        notice = (self._refresh_notice
+                  if self._refresh_notice
+                  and time.monotonic() < self._refresh_notice_until else "")
+        if cnt > 1:
+            sections = [_stack_section(x) for x in self._accounts]
+            dash = {"sections": sections, "notice": notice}
+            height = _stack_height(sections)
+        else:
+            dash = self._account_to_dash(a, self._acct_idx, cnt)
+            if notice:
+                dash["account"] = notice[:23]
+                dash["ok"] = True
+            height = 128 + EXTRA_ROW_H * len(dash["extra"])
+        if self._canvas.set_logical_height(height):
+            self._apply_full_size()
         self._canvas.set_dashboard(dash)
         if self._compact:
             self.update()
@@ -2794,9 +3563,14 @@ class OverlayWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         if self._compact:
-            p.fillRect(self.rect(), C_BG_MINI)
-            dash = self._mini_dash()
-            _draw_mini(p, dash, time.time() * 4, self.width(), self.height())
+            if self._mini_backdrop is not None:
+                # Stretch the taskbar slice across the strip = "see-through".
+                p.drawImage(QRectF(self.rect()), self._mini_backdrop)
+            else:
+                p.fillRect(self.rect(), self._mini_bg or C_BG_MINI)
+            _draw_mini(p, _mini_groups(self._accounts), time.time() * 4,
+                       self.width(), self.height(), bool(self._update_info),
+                       self._mini_bg)
             return
 
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
@@ -2817,21 +3591,6 @@ class OverlayWindow(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(body)
 
-    def _mini_dash(self) -> dict:
-        if not self._accounts:
-            return {
-                "ok": True, "kind": "claude",
-                "session": {"pct": 0, "active": False},
-                "weekly": {"pct": 0},
-                "update": bool(self._update_info),
-            }
-        a = self._accounts[self._acct_idx]
-        dash = self._account_to_dash(a, self._acct_idx, len(self._accounts))
-        if self._refresh_notice and time.monotonic() < self._refresh_notice_until:
-            dash["ok"] = True
-        dash["update"] = bool(self._update_info)
-        return dash
-
     # ── Mouse events ──────────────────────────────────────────────────────────
 
     def mousePressEvent(self, e):
@@ -2842,30 +3601,28 @@ class OverlayWindow(QWidget):
         elif e.button() == Qt.MouseButton.LeftButton:
             self._drag_start = e.globalPosition().toPoint()
             self._drag_pos = None
+            self._mini_drag = (e.globalPosition().x(), self._mini_offset)
         e.accept()
 
     def mouseMoveEvent(self, e):
         if (not self._compact and self._drag_pos is not None
                 and e.buttons() == Qt.MouseButton.LeftButton):
             self.move(e.globalPosition().toPoint() - self._drag_pos)
+        elif (self._compact and self._mini_drag is not None
+                and e.buttons() == Qt.MouseButton.LeftButton):
+            # Slide along the taskbar: left = further from the clock.
+            x0, off0 = self._mini_drag
+            dx = (e.globalPosition().x() - x0) * (self.devicePixelRatioF() or 1.0)
+            if abs(dx) >= 3:
+                self._mini_offset = max(0, int(round(off0 - dx)))
+                self._dock_mini()
         e.accept()
 
-    def _cycle_from_click(self) -> None:
-        if len(self._accounts) > 1:
-            self._acct_idx = (self._acct_idx + 1) % len(self._accounts)
-            self._refresh_display()
-
     def mouseReleaseEvent(self, e):
-        if (e.button() == Qt.MouseButton.LeftButton
-                and self._drag_start is not None
-                and (self._compact or self._stack.currentIndex() == 0)
-                and len(self._accounts) > 1):
-            delta = e.globalPosition().toPoint() - self._drag_start
-            if abs(delta.x()) < 5 and abs(delta.y()) < 5:
-                if self._compact:
-                    self._click_timer.start(QApplication.doubleClickInterval())
-                else:
-                    self._cycle_from_click()
+        if self._mini_drag is not None and self._mini_offset != self._mini_drag[1]:
+            save_app_config(mini_offset=self._mini_offset)
+            self._bg_ticks = 0              # re-sample the backdrop at the new spot
+        self._mini_drag = None
         self._drag_pos   = None
         self._drag_start = None
         e.accept()
@@ -2884,7 +3641,6 @@ class OverlayWindow(QWidget):
     def mouseDoubleClickEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if self._compact:
-                self._click_timer.stop()
                 self._enter_full(persist=True)
             else:
                 self.setWindowOpacity(0.92)
@@ -2939,11 +3695,6 @@ class OverlayWindow(QWidget):
             a_refresh.triggered.connect(self._manual_refresh)
             menu.addAction(a_refresh)
 
-            if len(self._accounts) > 1:
-                a_home = QAction("⌂  First account", self)
-                a_home.triggered.connect(self._go_home)
-                menu.addAction(a_home)
-
             a_sett = QAction("\u2699  Settings", self)
             a_sett.triggered.connect(self._show_settings)
             menu.addAction(a_sett)
@@ -2954,8 +3705,12 @@ class OverlayWindow(QWidget):
 
             menu.addSeparator()
 
+            a_add = QAction("+  Add account", self)
+            a_add.triggered.connect(lambda: self._show_auth(add=True))
+            menu.addAction(a_add)
+
             a_reauth = QAction("↩  Re-auth (sign in again)", self)
-            a_reauth.triggered.connect(self._show_auth)
+            a_reauth.triggered.connect(lambda: self._show_auth(add=False))
             menu.addAction(a_reauth)
 
         else:
@@ -3009,7 +3764,51 @@ class OverlayWindow(QWidget):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+_instance_mutex = None
+
+
+def _single_instance() -> bool:
+    """False if another Token Maxxing is already running (two copies would
+    both refresh the same rotating token and log each other out)."""
+    global _instance_mutex
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool,
+                                          ctypes.c_wchar_p]
+        _instance_mutex = kernel32.CreateMutexW(None, False,
+                                                "Local\\TokenMaxxingOverlay")
+        return ctypes.get_last_error() != 183          # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True
+
+
+def _install_excepthook() -> None:
+    """Log uncaught errors instead of letting PyQt6 abort the whole app."""
+    import traceback
+    log_path = os.path.join(CRED_DIR, "overlay_errors.log")
+
+    def hook(etype, value, tb):
+        try:
+            os.makedirs(CRED_DIR, exist_ok=True)
+            if os.path.exists(log_path) and os.path.getsize(log_path) > 256_000:
+                os.replace(log_path, log_path + ".old")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"--- {datetime.now().isoformat(timespec='seconds')} "
+                        f"v{APP_VERSION}\n")
+                traceback.print_exception(etype, value, tb, file=f)
+        except Exception:
+            pass
+    sys.excepthook = hook
+
+
 def main():
+    if not _single_instance():
+        sys.exit(0)
+    _install_excepthook()
     _win_set_app_user_model_id()
 
     # Pass fractional DPI scale factors through unrounded. The default policy
