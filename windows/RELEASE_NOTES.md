@@ -1,4 +1,14 @@
-## Token Maxxing — Windows desktop overlay v1.8
+## Token Maxxing — Windows desktop overlay v1.9
+
+### What's new in v1.9
+
+- **Weekly pace** — see whether you're burning the week too fast. An even
+  pace on day 2 is 2/7 ≈ 29% used; a white tick on the WEEKLY bar marks that
+  point, and a signed number shows how far ahead (`+12`) or behind (`-8`) you
+  are, in % of the weekly limit. Green up to +5, yellow up to +15, red beyond.
+  Single-account view shows it as a chip (`+17 SLOW`, `-12 UNDER`); the
+  stacked view shows the number beside each account's WEEKLY bar. Hidden for
+  the first 12 hours of the week, at 100%, and for Cursor (monthly pools).
 
 ### What's new in v1.8
 

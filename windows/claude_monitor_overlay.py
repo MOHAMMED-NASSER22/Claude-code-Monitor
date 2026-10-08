@@ -617,7 +617,7 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-APP_VERSION  = "1.8"            # keep in sync with windows/version_info.txt
+APP_VERSION  = "1.9"            # keep in sync with windows/version_info.txt
 GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
 UPDATE_BANNER_H = 26
@@ -1648,6 +1648,43 @@ def _draw_meter(g: Gfx, x, y, w, h, pct: int, col: QColor | None) -> None:
     g.draw_rect(x, y, w, h, border)
 
 
+WEEK_MIN       = 7 * 24 * 60
+PACE_GRACE_MIN = 12 * 60                   # too early in the week to judge pace
+
+
+def _weekly_pace(pct: int, reset_min) -> dict | None:
+    """Usage vs an even burn of the 7d window: on day 2 an even pace is 2/7 ≈ 29%.
+    None when there's nothing to judge (no reset time, first 12h, limit hit)."""
+    if not reset_min or reset_min <= 0 or pct < 0 or pct >= 100:
+        return None
+    elapsed = WEEK_MIN - min(int(reset_min), WEEK_MIN)
+    if elapsed < PACE_GRACE_MIN:
+        return None
+    expected = elapsed * 100 / WEEK_MIN
+    ahead = pct - expected
+    # Signed points vs even pace: "+12" = burning faster, "-8" = room to spare.
+    d = max(-99, min(99, round(ahead)))
+    delta = f"{d:+d}" if d else "0"
+    if ahead <= 0:
+        word, col = "UNDER", C_GREEN
+    elif ahead <= 5:
+        word, col = "ON PACE", C_GREEN
+    elif ahead <= 15:
+        word, col = "FAST", C_YELLOW
+    else:
+        word, col = "SLOW", C_RED
+    return {"expected": expected, "ahead": ahead, "delta": delta,
+            "label": f"{delta} {word}", "col": col}
+
+
+def _draw_pace_tick(g: Gfx, x, y, w, h, expected: float) -> None:
+    """White marker on a meter where an even weekly pace would be right now."""
+    tx = x + round(w * max(0.0, min(100.0, expected)) / 100)
+    g.draw_fast_vline(tx - 1, y - 2, h + 4, C_PANEL)
+    g.draw_fast_vline(tx + 1, y - 2, h + 4, C_PANEL)
+    g.draw_fast_vline(tx, y - 2, h + 4, C_TEXT)
+
+
 def _draw_spark(g: Gfx, cx, cy, t: float, base_outer, inner_r, rays, color, center_col) -> None:
     rot = t * 0.5
     breathe = 0.72 + 0.28 * math.sin(t * 1.6)
@@ -1733,19 +1770,22 @@ def _draw_cursor_mark(g: Gfx, cx, cy, ok: bool, t: float, size: float = 3.9,
 
 
 def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: float,
-                      brand: QColor = C_CLAUDE) -> None:
+                      brand: QColor = C_CLAUDE, pace: dict | None = None) -> None:
     idle = pct < 0
     col = C_DIM if idle else _pct_color(pct)
     red = (not idle and ok and pct >= 85)
     num_col = col if ok else C_DIM
     now_ms = int(time.time() * 1000)
+    pace = pace if ok and not idle else None
 
     g.text(label, 6, y0, brand if ok else C_DIM, 1)
     lw = _text_w(label, 1)
-    _draw_badge(g, 6 + lw + 5, y0 - 1, badge, C_DIM)
+    hx = 6 + lw + 5 + _draw_badge(g, 6 + lw + 5, y0 - 1, badge, C_DIM)
+    if pace:
+        hx += 4 + _draw_badge(g, hx + 4, y0 - 1, pace["label"], pace["col"])
 
     if red and (now_ms % 900) < 450:
-        wx = 6 + lw + 5 + _text_w(badge, 1) + 5 + 10
+        wx = hx + 5 + 5
         g.fill_triangle(wx - 5, y0 + 8, wx + 5, y0 + 8, wx, y0 - 1, C_RED)
         g.fill_rect(wx, y0 + 2, 1, 3, C_PANEL)
         g.fill_rect(wx, y0 + 6, 1, 1, C_PANEL)
@@ -1765,6 +1805,8 @@ def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: flo
 
     meter_col = None if idle else (C_RED if red else col)
     _draw_meter(g, 6, y0 + 40, 148, 7, 0 if idle else pct, meter_col)
+    if pace:
+        _draw_pace_tick(g, 6, y0 + 40, 148, 7, pace["expected"])
 
 
 EXTRA_ROW_H = 32                           # logical px per model-scoped limit row
@@ -1798,7 +1840,6 @@ def _draw_extra_row(g: Gfx, y0, row: dict, ok: bool, brand: QColor) -> None:
     _draw_meter(g, 58, y0 + 15, 96, 7, pct,
                 (C_RED if pct >= 85 else col) if ok else None)
 
-
 def _draw_dashboard(g: Gfx, d: dict, t: float,
                     poll_frac: float = 0.0, fetching: bool = False,
                     extra_rows: int = 0) -> None:
@@ -1830,7 +1871,8 @@ def _draw_dashboard(g: Gfx, d: dict, t: float,
     g.draw_fast_hline(6, 71, 148, C_TRACK)
 
     _draw_metric_card(g, 75, w.get("label", "WEEKLY"), w.get("badge", "7d"), w["pct"],
-                      w.get("resets_in_min", 0), ok, t, brand)
+                      w.get("resets_in_min", 0), ok, t, brand,
+                      None if cursor else _weekly_pace(w["pct"], w.get("resets_in_min")))
 
     # Model-scoped limits (e.g. Max's FABLE weekly) below the two main cards.
     extras = d.get("extra") or []
@@ -1867,14 +1909,15 @@ def _stack_section(a: dict) -> dict:
     if not ok:
         return sec
     if cursor:
-        sec["rows"] = [("AUTO", a.get("session_pct", 0), a.get("session_min")),
-                       ("API",  a.get("weekly_pct", 0),  a.get("weekly_min"))]
+        sec["rows"] = [("AUTO", a.get("session_pct", 0), a.get("session_min"), None),
+                       ("API",  a.get("weekly_pct", 0),  a.get("weekly_min"), None)]
         return sec
     active = a.get("active", False)
+    w_pct, w_min = a.get("weekly_pct", 0), a.get("weekly_min")
     sec["rows"] = [("SESSION", a.get("session_pct", 0) if active else -1,
-                    a.get("session_min") if active else None),
-                   ("WEEKLY", a.get("weekly_pct", 0), a.get("weekly_min"))]
-    sec["rows"] += [(x.get("label", ""), x.get("pct", 0), x.get("min"))
+                    a.get("session_min") if active else None, None),
+                   ("WEEKLY", w_pct, w_min, _weekly_pace(w_pct, w_min))]
+    sec["rows"] += [(x.get("label", ""), x.get("pct", 0), x.get("min"), None)
                     for x in a.get("extra") or []]
     return sec
 
@@ -1922,16 +1965,21 @@ def _draw_stacked(g: Gfx, d: dict, t: float,
             g.text((s["error"] or "error")[:24], 6, y + 1, C_DIM, 1)
             y += STACK_ROW + STACK_GAP
             continue
-        for label, pct, mins in s["rows"]:
+        for label, pct, mins, pace in s["rows"]:
             idle = pct < 0
             col = C_DIM if idle else _pct_color(pct)
             g.text(label[:7], 6, y + 1, C_DIM, 1)
             ps = "--" if idle else f"{pct}%"
-            g.text(ps, 76 - _text_w(ps, 1), y + 1, col, 1)
-            g.fill_rect(80, y + 2, 36, 5, C_TRACK)
-            fw = 0 if idle else round(36 * max(0, min(100, pct)) / 100)
+            g.text(ps, 73 - _text_w(ps, 1), y + 1, col, 1)
+            # Narrow bar leaves a column for the signed weekly pace ("+12").
+            g.fill_rect(76, y + 2, 24, 5, C_TRACK)
+            fw = 0 if idle else round(24 * max(0, min(100, pct)) / 100)
             if fw:
-                g.fill_rect(80, y + 2, fw, 5, C_RED if pct >= 85 else col)
+                g.fill_rect(76, y + 2, fw, 5, C_RED if pct >= 85 else col)
+            if pace:
+                _draw_pace_tick(g, 76, y + 2, 24, 5, pace["expected"])
+                g.text(pace["delta"], 121 - _text_w(pace["delta"], 1), y + 1,
+                       pace["col"], 1)
             rs = "idle" if idle else _fmt_short(mins)
             g.text(rs, 154 - _text_w(rs, 1), y + 1, C_DIM if idle else C_TEXT, 1)
             y += STACK_ROW
