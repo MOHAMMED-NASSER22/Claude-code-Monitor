@@ -617,7 +617,7 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-APP_VERSION  = "1.9"            # keep in sync with windows/version_info.txt
+APP_VERSION  = "1.10"            # keep in sync with windows/version_info.txt
 GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
 UPDATE_BANNER_H = 26
@@ -1648,19 +1648,22 @@ def _draw_meter(g: Gfx, x, y, w, h, pct: int, col: QColor | None) -> None:
     g.draw_rect(x, y, w, h, border)
 
 
+SESSION_MIN    = 5 * 60
 WEEK_MIN       = 7 * 24 * 60
-PACE_GRACE_MIN = 12 * 60                   # too early in the week to judge pace
+MONTH_MIN      = 30 * 24 * 60              # Cursor fallback when the cycle start is unknown
+PACE_GRACE     = 1 / 14                    # 12h of a week: too early in a window to judge pace
 
 
-def _weekly_pace(pct: int, reset_min) -> dict | None:
-    """Usage vs an even burn of the 7d window: on day 2 an even pace is 2/7 ≈ 29%.
-    None when there's nothing to judge (no reset time, first 12h, limit hit)."""
-    if not reset_min or reset_min <= 0 or pct < 0 or pct >= 100:
+def _pace(pct: int, reset_min, window_min=WEEK_MIN) -> dict | None:
+    """Usage vs an even burn of the window: on day 2 of 7 an even pace is 2/7 ≈ 29%.
+    None when there's nothing to judge (no reset time, first 1/14 of the window,
+    limit hit)."""
+    if not reset_min or reset_min <= 0 or not window_min or pct < 0 or pct >= 100:
         return None
-    elapsed = WEEK_MIN - min(int(reset_min), WEEK_MIN)
-    if elapsed < PACE_GRACE_MIN:
+    elapsed = window_min - min(int(reset_min), window_min)
+    if elapsed < window_min * PACE_GRACE:
         return None
-    expected = elapsed * 100 / WEEK_MIN
+    expected = elapsed * 100 / window_min
     ahead = pct - expected
     # Signed points vs even pace: "+12" = burning faster, "-8" = room to spare.
     d = max(-99, min(99, round(ahead)))
@@ -1677,12 +1680,13 @@ def _weekly_pace(pct: int, reset_min) -> dict | None:
             "label": f"{delta} {word}", "col": col}
 
 
+C_PACE_TICK = QColor(255, 255, 255, 128)   # faded white: findable, not loud
+
+
 def _draw_pace_tick(g: Gfx, x, y, w, h, expected: float) -> None:
-    """White marker on a meter where an even weekly pace would be right now."""
+    """Faded marker inside a meter where an even pace would be right now."""
     tx = x + round(w * max(0.0, min(100.0, expected)) / 100)
-    g.draw_fast_vline(tx - 1, y - 2, h + 4, C_PANEL)
-    g.draw_fast_vline(tx + 1, y - 2, h + 4, C_PANEL)
-    g.draw_fast_vline(tx, y - 2, h + 4, C_TEXT)
+    g.draw_fast_vline(min(tx, x + w - 1), y, h, C_PACE_TICK)
 
 
 def _draw_spark(g: Gfx, cx, cy, t: float, base_outer, inner_r, rays, color, center_col) -> None:
@@ -1866,13 +1870,14 @@ def _draw_dashboard(g: Gfx, d: dict, t: float,
 
     sess_pct = s["pct"] if s.get("active", True) else -1
     _draw_metric_card(g, 16, s.get("label", "SESSION"), s.get("badge", "5h"), sess_pct,
-                      s.get("resets_in_min", 0) if sess_pct >= 0 else 0, ok, t, brand)
+                      s.get("resets_in_min", 0) if sess_pct >= 0 else 0, ok, t, brand,
+                      _pace(sess_pct, s.get("resets_in_min"), s.get("window_min")))
 
     g.draw_fast_hline(6, 71, 148, C_TRACK)
 
     _draw_metric_card(g, 75, w.get("label", "WEEKLY"), w.get("badge", "7d"), w["pct"],
                       w.get("resets_in_min", 0), ok, t, brand,
-                      None if cursor else _weekly_pace(w["pct"], w.get("resets_in_min")))
+                      _pace(w["pct"], w.get("resets_in_min"), w.get("window_min")))
 
     # Model-scoped limits (e.g. Max's FABLE weekly) below the two main cards.
     extras = d.get("extra") or []
@@ -1909,14 +1914,19 @@ def _stack_section(a: dict) -> dict:
     if not ok:
         return sec
     if cursor:
-        sec["rows"] = [("AUTO", a.get("session_pct", 0), a.get("session_min"), None),
+        # Pace on the Auto pool only; API stays a plain meter.
+        s_pct, s_min = a.get("session_pct", 0), a.get("session_min")
+        sec["rows"] = [("AUTO", s_pct, s_min,
+                        _pace(s_pct, s_min, a.get("cycle_min") or MONTH_MIN)),
                        ("API",  a.get("weekly_pct", 0),  a.get("weekly_min"), None)]
         return sec
     active = a.get("active", False)
+    s_pct, s_min = a.get("session_pct", 0), a.get("session_min")
     w_pct, w_min = a.get("weekly_pct", 0), a.get("weekly_min")
-    sec["rows"] = [("SESSION", a.get("session_pct", 0) if active else -1,
-                    a.get("session_min") if active else None, None),
-                   ("WEEKLY", w_pct, w_min, _weekly_pace(w_pct, w_min))]
+    # Per-model rows (FABLE) stay without a pace number.
+    sec["rows"] = [("SESSION", s_pct if active else -1, s_min if active else None,
+                    _pace(s_pct, s_min, SESSION_MIN) if active else None),
+                   ("WEEKLY", w_pct, w_min, _pace(w_pct, w_min, WEEK_MIN))]
     sec["rows"] += [(x.get("label", ""), x.get("pct", 0), x.get("min"), None)
                     for x in a.get("extra") or []]
     return sec
@@ -1976,12 +1986,15 @@ def _draw_stacked(g: Gfx, d: dict, t: float,
             fw = 0 if idle else round(24 * max(0, min(100, pct)) / 100)
             if fw:
                 g.fill_rect(76, y + 2, fw, 5, C_RED if pct >= 85 else col)
+            rs = "idle" if idle else _fmt_short(mins)
+            rx = 154 - _text_w(rs, 1)
             if pace:
                 _draw_pace_tick(g, 76, y + 2, 24, 5, pace["expected"])
-                g.text(pace["delta"], 121 - _text_w(pace["delta"], 1), y + 1,
+                # Right-aligned at 121, nudged left when a wide reset ("2h46m") needs room.
+                dx = min(121, rx - 3)
+                g.text(pace["delta"], dx - _text_w(pace["delta"], 1), y + 1,
                        pace["col"], 1)
-            rs = "idle" if idle else _fmt_short(mins)
-            g.text(rs, 154 - _text_w(rs, 1), y + 1, C_DIM if idle else C_TEXT, 1)
+            g.text(rs, rx, y + 1, C_DIM if idle else C_TEXT, 1)
             y += STACK_ROW
         y += STACK_GAP
 
@@ -3554,6 +3567,9 @@ class OverlayWindow(QWidget):
         # the rolling 5h session + 7d weekly windows.
         s_label, s_badge = ("AUTO", "mo") if cursor else ("SESSION", "5h")
         w_label, w_badge = ("API",  "mo") if cursor else ("WEEKLY",  "7d")
+        # Pace windows; None = no pace (Cursor API pool).
+        s_win, w_win = (((a.get("cycle_min") or MONTH_MIN), None) if cursor
+                        else (SESSION_MIN, WEEK_MIN))
         return {
             "ok":      a["ok"],
             "account": acct,
@@ -3565,6 +3581,7 @@ class OverlayWindow(QWidget):
                 "badge":         s_badge,
                 "pct":           a["session_pct"] if a.get("active") else -1,
                 "resets_in_min": sess_min,
+                "window_min":    s_win,
                 "active":        a.get("active", False),
             },
             "weekly": {
@@ -3572,6 +3589,7 @@ class OverlayWindow(QWidget):
                 "badge":         w_badge,
                 "pct":           a["weekly_pct"],
                 "resets_in_min": week_min,
+                "window_min":    w_win,
             },
         }
 

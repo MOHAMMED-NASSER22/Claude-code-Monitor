@@ -1,4 +1,18 @@
-## Token Maxxing — Windows desktop overlay v1.9
+## Token Maxxing — Windows desktop overlay v1.10
+
+### What's new in v1.10
+
+- **Pace on more rows** — the signed pace number (`+13` = burning faster than
+  an even pace, `-38` = room to spare) now also shows on **SESSION** (vs an
+  even burn of the 5h window) and on **Cursor AUTO** (vs the billing cycle,
+  read from Cursor; 30 days if unknown). Per-model rows (**FABLE**) and
+  **Cursor API** stay without it.
+- **Quieter pace marker** — the even-pace tick is now a thin, 50% faded line
+  inside the bar instead of a bright line sticking out of it.
+- Pace is hidden for the first 1/14 of any window (12h of a week, ~21 min of a
+  session, ~2 days of a Cursor month).
+- In the stacked view the pace number moves left when a wide reset time
+  (`2h46m`) needs the room, so they no longer touch.
 
 ### What's new in v1.9
 

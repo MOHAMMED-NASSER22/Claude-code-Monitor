@@ -151,6 +151,10 @@ def fetch_cursor_accounts() -> list[dict]:
     auto = plan.get("autoPercentUsed")
     api = plan.get("apiPercentUsed")
     reset_min = _minutes_until(resp.get("billingCycleEnd"))
+    try:   # cycle length for the pace indicator; overlay falls back to 30 days
+        cycle_min = (int(resp["billingCycleEnd"]) - int(resp["billingCycleStart"])) // 60000
+    except (KeyError, TypeError, ValueError):
+        cycle_min = None
 
     def pct(v):
         try:
@@ -166,6 +170,7 @@ def fetch_cursor_accounts() -> list[dict]:
         "session_min": reset_min,
         "weekly_pct":  pct(api),        # -> API card
         "weekly_min":  reset_min,
+        "cycle_min":   cycle_min if cycle_min and cycle_min > 0 else None,
         "active":      True,
         "ok":          True,
         "error":       "",
