@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Token Maxxing</string>
+    <string name="widget_name">Token Maxxing usage</string>
+    <string name="widget_desc">Claude usage and pace. Resize it to switch between one account and all accounts.</string>
+</resources>
