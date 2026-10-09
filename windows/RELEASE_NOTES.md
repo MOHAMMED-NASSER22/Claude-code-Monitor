@@ -1,4 +1,13 @@
-## Token Maxxing — Windows desktop overlay v1.10
+## Token Maxxing — Windows desktop overlay v1.11
+
+### What's new in v1.11
+
+- **Pace in the taskbar strip** — the minimized strip next to the clock now
+  shows the signed pace beside each number in smaller type (`45 +5`,
+  `37 -9`), in the same green / yellow / red as the full window. Session and
+  weekly for Claude, Auto for Cursor; Cursor API and an idle session show none.
+- The pace column has a fixed width, so the strip doesn't resize as paces
+  appear or disappear (about 16 px more per account).
 
 ### What's new in v1.10
 

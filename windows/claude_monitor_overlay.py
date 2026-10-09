@@ -617,7 +617,7 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-APP_VERSION  = "1.10"            # keep in sync with windows/version_info.txt
+APP_VERSION  = "1.11"            # keep in sync with windows/version_info.txt
 GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
 UPDATE_BANNER_H = 26
@@ -2028,20 +2028,33 @@ def _mini_font(h: int) -> QFont:
     return f
 
 
+def _mini_font_small(h: int) -> QFont:
+    """Pace numbers beside the strip's values: a step smaller than the values."""
+    f = QFont("Segoe UI")
+    f.setPixelSize(max(8, min(9, (h - 8) // 3 - 3)))
+    f.setWeight(QFont.Weight.DemiBold)
+    return f
+
+
 def _mini_groups(accounts: list[dict]) -> list[dict]:
-    """One strip group per account: logo, short tag, and two value lines."""
+    """One strip group per account: logo, short tag, and two value lines
+    (label, pct, pace) — pace as in the stacked view (none for Cursor API)."""
     groups = []
     for a in accounts:
         cursor = a.get("kind") == "cursor"
         ok = bool(a.get("ok"))
         active = a.get("active", False)
+        s_pct, s_min = a.get("session_pct", 0), a.get("session_min")
+        w_pct, w_min = a.get("weekly_pct", 0), a.get("weekly_min")
         if cursor:
             tag = "CUR"
-            lines = [("A", a.get("session_pct", 0)), ("P", a.get("weekly_pct", 0))]
+            lines = [("A", s_pct, _pace(s_pct, s_min, a.get("cycle_min") or MONTH_MIN)),
+                     ("P", w_pct, None)]
         else:
             tag = re.sub(r"[^A-Z]", "", (a.get("plan") or "").upper())[:3]                 or (a.get("label") or "?")[:3].upper()
-            lines = [("S", a.get("session_pct", 0) if active else -1),
-                     ("W", a.get("weekly_pct", 0))]
+            lines = [("S", s_pct if active else -1,
+                      _pace(s_pct, s_min, SESSION_MIN) if active else None),
+                     ("W", w_pct, _pace(w_pct, w_min, WEEK_MIN))]
         groups.append({"cursor": cursor, "ok": ok, "tag": tag, "lines": lines,
                        "name": a.get("label") or ""})
     return groups
@@ -2050,17 +2063,28 @@ def _mini_groups(accounts: list[dict]) -> list[dict]:
 MINI_PAD, MINI_GAP, MINI_LOGO = 4, 7, 13
 
 
+def _mini_delta_w(h: int) -> int:
+    """Fixed pace column, so the strip never changes width as paces come and go."""
+    return 2 + QFontMetrics(_mini_font_small(h)).horizontalAdvance("+99")
+
+
 def _mini_width(groups: list[dict], h: int) -> int:
     fm = QFontMetrics(_mini_font(h))
     val_w = fm.horizontalAdvance("100")
     n = max(1, len(groups))
-    return MINI_PAD * 2 + n * (MINI_LOGO + 3 + val_w) + (n - 1) * MINI_GAP
+    return (MINI_PAD * 2 + n * (MINI_LOGO + 3 + val_w + _mini_delta_w(h))
+            + (n - 1) * MINI_GAP)
+
+
+_PACE_LIGHT = {C_GREEN.rgb(): QColor(18, 128, 52), C_YELLOW.rgb(): QColor(168, 110, 0),
+               C_RED.rgb(): QColor(196, 32, 28)}   # readable on a light taskbar
 
 
 def _draw_mini(p: QPainter, groups: list[dict], t: float, w: int, h: int,
                update: bool = False, bg: QColor | None = None) -> None:
     """Taskbar strip: every account side by side. Logo + plan tag, then two
-    numbers: top = session (Cursor: Auto), bottom = weekly (Cursor: API)."""
+    numbers: top = session (Cursor: Auto), bottom = weekly (Cursor: API), each
+    with its signed pace beside it in smaller type."""
     light = _is_light(bg)
     dim = QColor(96, 96, 104) if light else C_DIM
     f = _mini_font(h)
@@ -2069,6 +2093,9 @@ def _draw_mini(p: QPainter, groups: list[dict], t: float, w: int, h: int,
     val_w = fm.horizontalAdvance("100")
     line_h = fm.height()
     top = (h - 2 * line_h) / 2
+    small = _mini_font_small(h)
+    small_fm = QFontMetrics(small)
+    delta_w = _mini_delta_w(h)
     tag_f = QFont("Segoe UI")
     tag_f.setPixelSize(max(7, min(8, h // 6)))
     tag_f.setWeight(QFont.Weight.Bold)
@@ -2083,7 +2110,7 @@ def _draw_mini(p: QPainter, groups: list[dict], t: float, w: int, h: int,
     x = MINI_PAD
     g = Gfx(p)
     for grp in groups or [{"cursor": False, "ok": True, "tag": "",
-                           "lines": [("S", -1), ("W", -1)], "name": ""}]:
+                           "lines": [("S", -1, None), ("W", -1, None)], "name": ""}]:
         ok = grp["ok"]
         # Logo in the upper part, plan/source tag underneath.
         cx, cy = x + MINI_LOGO / 2, h * 0.38
@@ -2101,16 +2128,26 @@ def _draw_mini(p: QPainter, groups: list[dict], t: float, w: int, h: int,
         p.setFont(f)
 
         vx = x + MINI_LOGO + 3
-        for i, (_lab, pct) in enumerate(grp["lines"]):
+        for i, (_lab, pct, pace) in enumerate(grp["lines"]):
             y = top + i * line_h
             if not ok or pct is None or pct < 0:
                 txt, col = "--", dim
+                pace = None
             else:
                 pct = max(0, min(100, int(pct)))
                 txt, col = str(pct), _pct_color(pct, light)
             p.setPen(col)
             p.drawText(QRectF(vx, y, val_w, line_h), align_r, txt)
-        x = vx + val_w + MINI_GAP
+            if pace:
+                pcol = _PACE_LIGHT.get(pace["col"].rgb(), pace["col"]) if light else pace["col"]
+                p.setFont(small)
+                p.setPen(pcol)
+                # Sit on the value's baseline: nudge down by the ascent difference.
+                dy = fm.ascent() - small_fm.ascent()
+                p.drawText(QRectF(vx + val_w + 2, y + dy, delta_w, small_fm.height()),
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), pace["delta"])
+                p.setFont(f)
+        x = vx + val_w + delta_w + MINI_GAP
 
 
 class DashboardCanvas(QWidget):
