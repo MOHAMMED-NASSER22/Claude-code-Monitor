@@ -7,17 +7,18 @@ import kotlin.math.roundToInt
 /** A signed-in Claude account. Tokens rotate on every refresh, so this is rewritten often. */
 data class Cred(
     val id: String,
+    val kind: String = KIND_CLAUDE,
     val label: String,
     val accessToken: String,
     val refreshToken: String,
     val expiresAt: Long,            // epoch ms
-    val uuid: String = "",
+    val uuid: String = "",          // Claude account uuid / Cursor user id
     val plan: String = "",
     val planCheckedAt: Long = 0,
     val notify: Boolean = false,    // notify at 85%
 ) {
     fun toJson(): JSONObject = JSONObject()
-        .put("id", id).put("label", label)
+        .put("id", id).put("kind", kind).put("label", label)
         .put("accessToken", accessToken).put("refreshToken", refreshToken)
         .put("expiresAt", expiresAt).put("uuid", uuid)
         .put("plan", plan).put("planCheckedAt", planCheckedAt).put("notify", notify)
@@ -25,6 +26,7 @@ data class Cred(
     companion object {
         fun from(j: JSONObject) = Cred(
             id = j.getString("id"),
+            kind = j.optString("kind", KIND_CLAUDE),
             label = j.optString("label"),
             accessToken = j.optString("accessToken"),
             refreshToken = j.optString("refreshToken"),
@@ -50,8 +52,16 @@ data class Limit(val label: String, val pct: Int, val resetsAt: Long?) {
     }
 }
 
+const val KIND_CLAUDE = "claude"
+const val KIND_CURSOR = "cursor"
+
+/**
+ * One account's limits. Claude: session = 5h SESSION, weekly = 7d WEEKLY, extra = FABLE…
+ * Cursor: session = AUTO pool, weekly = API pool, both on the monthly billing cycle.
+ */
 data class Usage(
     val id: String,
+    val kind: String = KIND_CLAUDE,
     val label: String,
     val plan: String,
     val ok: Boolean,
@@ -61,17 +71,42 @@ data class Usage(
     val weekly: Limit = Limit("WEEKLY", 0, null),
     val extra: List<Limit> = emptyList(),
     val fetchedAt: Long = 0,
+    val cycleMin: Int = 0,          // Cursor billing cycle length
 ) {
+    val isCursor get() = kind == KIND_CURSOR
+
+    /** Pace on the first row: Claude SESSION (while a session runs) or Cursor AUTO. */
+    fun sessionPace(now: Long = System.currentTimeMillis()): Pace? = when {
+        isCursor -> Pace.of(session.pct, session.resetsAt, if (cycleMin > 0) cycleMin else Pace.MONTH_MIN, now)
+        active -> Pace.of(session.pct, session.resetsAt, Pace.SESSION_MIN, now)
+        else -> null
+    }
+
+    /** Pace on the second row: Claude WEEKLY; none for Cursor's API pool. */
+    fun weeklyPace(now: Long = System.currentTimeMillis()): Pace? =
+        if (isCursor) null else Pace.of(weekly.pct, weekly.resetsAt, Pace.WEEK_MIN, now)
+
+    /** Session % to show, -1 when idle (Claude with no running 5h session). */
+    val sessionShown get() = if (isCursor || active) session.pct else -1
+
+    /** The headline number for one-account widgets: Claude WEEKLY, Cursor AUTO. */
+    val main get() = if (isCursor) session else weekly
+    fun mainPace(now: Long = System.currentTimeMillis()) = if (isCursor) sessionPace(now) else weeklyPace(now)
+
+    val sessionBadge get() = if (isCursor) "mo" else "5h"
+    val weeklyBadge get() = if (isCursor) "mo" else "7d"
+
     fun toJson(): JSONObject = JSONObject()
-        .put("id", id).put("label", label).put("plan", plan).put("ok", ok)
+        .put("id", id).put("kind", kind).put("label", label).put("plan", plan).put("ok", ok)
         .put("error", error).put("active", active)
         .put("session", session.toJson()).put("weekly", weekly.toJson())
         .put("extra", JSONArray().apply { extra.forEach { put(it.toJson()) } })
-        .put("fetchedAt", fetchedAt)
+        .put("fetchedAt", fetchedAt).put("cycleMin", cycleMin)
 
     companion object {
         fun from(j: JSONObject) = Usage(
             id = j.getString("id"),
+            kind = j.optString("kind", KIND_CLAUDE),
             label = j.optString("label"),
             plan = j.optString("plan"),
             ok = j.optBoolean("ok"),
@@ -83,6 +118,7 @@ data class Usage(
                 (0 until a.length()).map { Limit.from(a.getJSONObject(it)) }
             } ?: emptyList(),
             fetchedAt = j.optLong("fetchedAt"),
+            cycleMin = j.optInt("cycleMin"),
         )
     }
 }
@@ -96,6 +132,7 @@ object Colors {
     const val LINE   = 0xFF1D2229
     const val ACCENT = 0xFF00A8F8
     const val CLAUDE = 0xFFD87450
+    const val CURSOR = 0xFFE6E6EC
     const val GREEN  = 0xFF28BC50
     const val YELLOW = 0xFFF8CC00
     const val RED    = 0xFFF83430
@@ -113,6 +150,7 @@ data class Pace(val expected: Double, val ahead: Double, val delta: String, val 
     companion object {
         const val SESSION_MIN = 5 * 60
         const val WEEK_MIN = 7 * 24 * 60
+        const val MONTH_MIN = 30 * 24 * 60      // Cursor fallback when the cycle start is unknown
         private const val GRACE = 1.0 / 14          // 12h of a week
 
         fun of(pct: Int, resetsAt: Long?, windowMin: Int, now: Long = System.currentTimeMillis()): Pace? {

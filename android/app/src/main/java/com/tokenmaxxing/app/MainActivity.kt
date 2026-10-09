@@ -43,7 +43,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.glance.appwidget.updateAll
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import java.util.UUID
 import kotlinx.coroutines.launch
 
 private fun c(v: Long) = Color(v)
@@ -157,6 +160,25 @@ private fun Spark(size: Dp, color: Long = Colors.CLAUDE) {
     }
 }
 
+/** Cursor's mark: an outlined hexagon (a cube seen corner-on). */
+@Composable
+private fun Cube(size: Dp, color: Long = Colors.CURSOR) {
+    Canvas(Modifier.size(size)) {
+        val s = this.size.minDimension
+        val w = s * 0.09f
+        val pts = listOf(Offset(s / 2, w), Offset(s - w, s * .27f), Offset(s - w, s * .73f),
+                         Offset(s / 2, s - w), Offset(w, s * .73f), Offset(w, s * .27f))
+        pts.indices.forEach { i -> drawLine(c(color), pts[i], pts[(i + 1) % 6], strokeWidth = w) }
+        drawLine(c(color), Offset(w, s * .27f), Offset(s / 2, s / 2), strokeWidth = w)
+        drawLine(c(color), Offset(s - w, s * .27f), Offset(s / 2, s / 2), strokeWidth = w)
+        drawLine(c(color), Offset(s / 2, s / 2), Offset(s / 2, s - w), strokeWidth = w)
+    }
+}
+
+@Composable
+private fun Mark(u: Usage, size: Dp) = if (u.isCursor) Cube(size) else Spark(size)
+private fun brand(u: Usage) = if (u.isCursor) Colors.CURSOR else Colors.CLAUDE
+
 @Composable
 private fun Header(title: String, onBack: (() -> Unit)?, trailing: @Composable RowScope.() -> Unit = {}) {
     Column {
@@ -201,16 +223,14 @@ private fun ColumnScope.ListScreen(
             Column(Modifier.fillMaxWidth().clickable { onOpen(u.id) }.padding(vertical = 14.dp),
                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Spark(16.dp)
+                    Mark(u, 16.dp)
                     Spacer(Modifier.width(8.dp))
-                    MonoText(u.label, Colors.CLAUDE, 17.sp, Modifier.weight(1f))
+                    MonoText(u.label, brand(u), 17.sp, Modifier.weight(1f))
                     if (u.plan.isNotBlank()) Badge(u.plan)
                 }
                 if (!u.ok) MonoText(u.error, Colors.RED, 12.sp)
-                ListRow("SESSION", if (u.active) u.session.pct else -1, u.session.resetsAt,
-                        if (u.active) Pace.of(u.session.pct, u.session.resetsAt, Pace.SESSION_MIN, now) else null, u.ok, now)
-                ListRow("WEEKLY", u.weekly.pct, u.weekly.resetsAt,
-                        Pace.of(u.weekly.pct, u.weekly.resetsAt, Pace.WEEK_MIN, now), u.ok, now)
+                ListRow(u.session.label, u.sessionShown, u.session.resetsAt, u.sessionPace(now), u.ok, now)
+                ListRow(u.weekly.label, u.weekly.pct, u.weekly.resetsAt, u.weeklyPace(now), u.ok, now)
                 u.extra.forEach { ListRow(it.label, it.pct, it.resetsAt, null, u.ok, now) }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(c(Colors.LINE)))
@@ -290,13 +310,14 @@ private fun ColumnScope.DetailScreen(u: Usage, busy: Boolean, now: Long, onBack:
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
            verticalArrangement = Arrangement.spacedBy(22.dp)) {
         if (!u.ok) MonoText(u.error, Colors.RED, 13.sp)
-        val sp = if (u.active) Pace.of(u.session.pct, u.session.resetsAt, Pace.SESSION_MIN, now) else null
-        BigCard("SESSION", "5h", if (u.active) u.session.pct else -1, u.session.resetsAt, sp,
-                paceSentence(u.session.pct, u.session.resetsAt, Pace.SESSION_MIN, sp, now), u.ok, now)
+        val sp = u.sessionPace(now)
+        val sWindow = if (u.isCursor) (if (u.cycleMin > 0) u.cycleMin else Pace.MONTH_MIN) else Pace.SESSION_MIN
+        BigCard(u.session.label, u.sessionBadge, u.sessionShown, u.session.resetsAt, sp,
+                paceSentence(u.session.pct, u.session.resetsAt, sWindow, sp, now), u.ok, now, brand(u))
         Box(Modifier.fillMaxWidth().height(1.dp).background(c(Colors.LINE)))
-        val wp = Pace.of(u.weekly.pct, u.weekly.resetsAt, Pace.WEEK_MIN, now)
-        BigCard("WEEKLY", "7d", u.weekly.pct, u.weekly.resetsAt, wp,
-                paceSentence(u.weekly.pct, u.weekly.resetsAt, Pace.WEEK_MIN, wp, now), u.ok, now)
+        val wp = u.weeklyPace(now)
+        BigCard(u.weekly.label, u.weeklyBadge, u.weekly.pct, u.weekly.resetsAt, wp,
+                paceSentence(u.weekly.pct, u.weekly.resetsAt, Pace.WEEK_MIN, wp, now), u.ok, now, brand(u))
         if (u.extra.isNotEmpty()) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(c(Colors.LINE)))
             u.extra.forEach { ListRow(it.label, it.pct, it.resetsAt, null, u.ok, now) }
@@ -369,12 +390,12 @@ private fun SettingRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) 
 
 @Composable
 private fun BigCard(label: String, badge: String, pct: Int, resetsAt: Long?, pace: Pace?,
-                    sentence: String?, ok: Boolean, now: Long) {
+                    sentence: String?, ok: Boolean, now: Long, labelCol: Long = Colors.CLAUDE) {
     val idle = pct < 0
     val col = if (!ok || idle) Colors.DIM else Colors.forPct(pct)
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MonoText(label, Colors.CLAUDE, 15.sp)
+            MonoText(label, labelCol, 15.sp)
             Badge(badge)
             if (pace != null) Badge("${pace.delta} ${pace.word}", pace.color)
         }
@@ -394,6 +415,34 @@ private fun BigCard(label: String, badge: String, pct: Int, resetsAt: Long?, pac
 @Composable
 private fun ColumnScope.SignInScreen(canGoBack: Boolean, onBack: () -> Unit, onDone: () -> Unit) {
     val ctx = LocalContext.current
+    var provider by remember {
+        mutableStateOf(if (Store.pendingCursor(ctx).isNotBlank()) KIND_CURSOR else KIND_CLAUDE)
+    }
+    Header("ADD ACCOUNT", if (canGoBack) onBack else null)
+    Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 18.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        ProviderTab("Claude", provider == KIND_CLAUDE, Colors.CLAUDE, Modifier.weight(1f)) { provider = KIND_CLAUDE }
+        ProviderTab("Cursor", provider == KIND_CURSOR, Colors.CURSOR, Modifier.weight(1f)) { provider = KIND_CURSOR }
+    }
+    if (provider == KIND_CLAUDE) ClaudeSignIn(onDone) else CursorSignIn(onDone)
+}
+
+@Composable
+private fun ProviderTab(label: String, selected: Boolean, color: Long, modifier: Modifier, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick, modifier = modifier.height(48.dp), shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(if (selected) 2.dp else 1.dp, c(if (selected) color else 0xFF3A434E)),
+        colors = ButtonDefaults.outlinedButtonColors(containerColor = if (selected) c(0xFF14181D) else Color.Transparent),
+    ) {
+        if (label == "Cursor") Cube(16.dp) else Spark(16.dp)
+        Spacer(Modifier.width(8.dp))
+        Text(label, color = c(if (selected) Colors.TEXT else Colors.DIM), fontSize = 15.sp)
+    }
+}
+
+@Composable
+private fun ColumnScope.ClaudeSignIn(onDone: () -> Unit) {
+    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     var code by remember { mutableStateOf("") }
@@ -401,8 +450,7 @@ private fun ColumnScope.SignInScreen(canGoBack: Boolean, onBack: () -> Unit, onD
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    Header("ADD ACCOUNT", if (canGoBack) onBack else null)
-    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 28.dp),
+    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp),
            verticalArrangement = Arrangement.spacedBy(24.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Spark(40.dp)
@@ -470,6 +518,91 @@ private fun ColumnScope.SignInScreen(canGoBack: Boolean, onBack: () -> Unit, onD
         } else {
             OutlinedButton(onClick = openClaude, modifier = Modifier.fillMaxWidth().height(48.dp),
                            shape = RoundedCornerShape(12.dp)) { Text("Open claude.ai again", color = c(Colors.SOFT)) }
+        }
+    }
+}
+
+
+/**
+ * Cursor works like the Cursor app's own login: cursor.com asks you to confirm, and the
+ * app polls until it gets the token. Nothing to copy or paste.
+ */
+@Composable
+private fun ColumnScope.CursorSignIn(onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    var pending by remember { mutableStateOf(Store.pendingCursor(ctx)) }
+    var status by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(pending) {
+        if (pending.isBlank()) return@LaunchedEffect
+        val uuid = pending.substringBefore("|")
+        val verifier = pending.substringAfter("|")
+        status = "Waiting for you to confirm in the browser…"
+        val deadline = System.currentTimeMillis() + 10 * 60_000
+        while (System.currentTimeMillis() < deadline) {
+            val res = withContext(Dispatchers.IO) { CursorApi.poll(uuid, verifier) }
+            if (res != null) {
+                status = "Signed in. Loading your usage…"
+                try {
+                    Repo.addCursorAccount(ctx, res)
+                    Repo.refreshAll(ctx, force = true)
+                    onDone()
+                } catch (e: Exception) {
+                    status = ""
+                    error = e.message ?: "Cursor sign-in failed"
+                }
+                return@LaunchedEffect
+            }
+            delay(2_000)
+        }
+        Store.setPendingCursor(ctx, "")
+        pending = ""
+        status = ""
+        error = "The Cursor sign-in timed out. Tap Open cursor.com to try again."
+    }
+
+    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp),
+           verticalArrangement = Arrangement.spacedBy(24.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Cube(40.dp)
+            Text("Add your Cursor account", color = c(Colors.TEXT), fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+            Text("Shows your Auto + Composer and API usage for this billing month, with the same pace line.",
+                 color = c(Colors.SOFT), fontSize = 15.sp)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Step("1", "Tap Open cursor.com. Sign in there if it asks (Google, GitHub or email all work).")
+            Step("2", "Confirm the login on the Cursor page.")
+            Step("3", "Come back here. The account appears by itself, no code needed.")
+        }
+        if (status.isNotBlank()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = c(Colors.ACCENT))
+                Spacer(Modifier.width(10.dp))
+                Text(status, color = c(Colors.TEXT), fontSize = 14.sp)
+            }
+        }
+        error?.let { Text(it, color = c(Colors.RED), fontSize = 14.sp) }
+        Row(Modifier.border(1.dp, c(Colors.LINE), RoundedCornerShape(10.dp)).padding(12.dp)) {
+            Text("This is a separate login for the phone. It doesn't sign you out of Cursor on your PC.",
+                 color = c(Colors.DIM), fontSize = 13.sp)
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
+        Button(
+            onClick = {
+                val p = UUID.randomUUID().toString() + "|" + Api.randomToken()
+                Store.setPendingCursor(ctx, p)
+                error = null
+                pending = p
+                ctx.startActivity(Intent(Intent.ACTION_VIEW,
+                    Uri.parse(CursorApi.loginUrl(p.substringBefore("|"), p.substringAfter("|")))))
+            },
+            modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = c(Colors.CURSOR), contentColor = Color.Black),
+        ) {
+            Text(if (pending.isBlank()) "Open cursor.com" else "Open cursor.com again",
+                 fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

@@ -67,6 +67,10 @@ object Store {
     fun pendingVerifier(ctx: Context): String = prefs(ctx).getString("pkce", "") ?: ""
     fun setPendingVerifier(ctx: Context, v: String) = prefs(ctx).edit().putString("pkce", v).commit()
 
+    /** Cursor login in progress: "uuid|verifier", polled until the browser approves it. */
+    fun pendingCursor(ctx: Context): String = prefs(ctx).getString("cursorPending", "") ?: ""
+    fun setPendingCursor(ctx: Context, v: String) = prefs(ctx).edit().putString("cursorPending", v).commit()
+
     fun wasNotified(ctx: Context, key: String) = prefs(ctx).getBoolean("n:$key", false)
     fun markNotified(ctx: Context, key: String) = prefs(ctx).edit().putBoolean("n:$key", true).apply()
 }

@@ -75,6 +75,7 @@ object Repo {
     }
 
     private fun fetchOne(ctx: Context, c0: Cred, prev: Usage?): Usage {
+        if (c0.kind == KIND_CURSOR) return fetchCursor(ctx, c0, prev)
         var c = c0
         return try {
             c = ensureToken(ctx, c, force = false)
@@ -109,6 +110,66 @@ object Repo {
             // Keep the last good numbers visible, flagged with the error.
             (prev ?: Usage(id = c.id, label = c.label, plan = c.plan, ok = false))
                 .copy(label = c.label, ok = false, error = e.message ?: "Error")
+        }
+    }
+
+    /** Cursor's two monthly pools: Auto + Composer (AUTO) and API. */
+    private fun fetchCursor(ctx: Context, c0: Cred, prev: Usage?): Usage {
+        var c = c0
+        return try {
+            var r = CursorApi.usage(c.uuid, c.accessToken)
+            if (r.status == 401 || r.status == 403) {
+                val t = CursorApi.refresh(c.refreshToken)
+                    ?: throw IllegalStateException("Cursor sign-in expired. Add the Cursor account again.")
+                c = c.copy(accessToken = t.getString("access_token"),
+                           refreshToken = t.optString("refresh_token").ifBlank { c.refreshToken })
+                Store.updateCred(ctx, c.id) { it.copy(accessToken = c.accessToken, refreshToken = c.refreshToken) }
+                r = CursorApi.usage(c.uuid, c.accessToken)
+            }
+            val j = r.json()
+            if (r.status != 200 || j == null) {
+                throw IllegalStateException(
+                    if (r.status == 0) "No connection" else "Cursor usage returned HTTP ${r.status}")
+            }
+            val plan = j.optJSONObject("planUsage") ?: JSONObject()
+            val end = parseTime(j.opt("billingCycleEnd"))
+            val start = parseTime(j.opt("billingCycleStart"))
+            val cycle = if (end != null && start != null && end > start) ((end - start) / 60_000).toInt() else 0
+            Usage(
+                id = c.id, kind = KIND_CURSOR, label = c.label, plan = "", ok = true, active = true,
+                session = Limit("AUTO", pct(plan.opt("autoPercentUsed")), end),
+                weekly = Limit("API", pct(plan.opt("apiPercentUsed")), end),
+                fetchedAt = System.currentTimeMillis(),
+                cycleMin = cycle,
+            )
+        } catch (e: Exception) {
+            (prev ?: Usage(id = c.id, kind = KIND_CURSOR, label = c.label, plan = "", ok = false))
+                .copy(label = c.label, ok = false, error = e.message ?: "Error")
+        }
+    }
+
+    /** Save the Cursor login that [CursorApi.poll] returned. Signing in again updates it in place. */
+    suspend fun addCursorAccount(ctx: Context, res: JSONObject): Cred = withContext(Dispatchers.IO) {
+        val token = res.getString("accessToken")
+        val uid = CursorApi.userId(token, res.optString("authId"))
+        require(uid.isNotBlank()) { "Cursor didn't return an account id. Try again." }
+        Store.setPendingCursor(ctx, "")
+        lock.withLock {
+            val creds = Store.creds(ctx)
+            val existing = creds.firstOrNull { it.kind == KIND_CURSOR && it.uuid == uid }
+            val cred = Cred(
+                id = existing?.id ?: UUID.randomUUID().toString(),
+                kind = KIND_CURSOR,
+                label = existing?.label ?: "Cursor",
+                accessToken = token,
+                refreshToken = res.optString("refreshToken"),
+                expiresAt = 0,
+                uuid = uid,
+                notify = existing?.notify ?: false,
+            )
+            Store.saveCreds(ctx, if (existing != null) creds.map { if (it.id == cred.id) cred else it }
+                                 else creds + cred)
+            cred
         }
     }
 
@@ -192,13 +253,16 @@ object Repo {
 
     // ── parsing (mirrors the desktop overlay) ────────────────────────────────
 
-    private fun pct(v: Any?): Int = ((v as? Number)?.toDouble() ?: 0.0).roundToInt().coerceIn(0, 100)
+    private fun pct(v: Any?): Int =
+        ((v as? Number)?.toDouble() ?: v?.toString()?.toDoubleOrNull() ?: 0.0).roundToInt().coerceIn(0, 100)
 
     private fun parseTime(v: Any?): Long? = when (v) {
         null, JSONObject.NULL -> null
         is Number -> v.toDouble().let { if (it > 1e11) it.toLong() else (it * 1000).toLong() }
         else -> v.toString().let { s ->
-            try { OffsetDateTime.parse(s).toInstant().toEpochMilli() }
+            val n = s.toDoubleOrNull()          // Cursor sends epoch ms as a string
+            if (n != null) (if (n > 1e11) n.toLong() else (n * 1000).toLong())
+            else try { OffsetDateTime.parse(s).toInstant().toEpochMilli() }
             catch (e: Exception) { try { Instant.parse(s).toEpochMilli() } catch (e2: Exception) { null } }
         }
     }

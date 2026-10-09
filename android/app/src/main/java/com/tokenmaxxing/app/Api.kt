@@ -128,3 +128,75 @@ object Api {
 
     fun authHeaders(token: String) = mapOf("Authorization" to "Bearer $token", "anthropic-beta" to BETA)
 }
+
+/**
+ * Cursor. On the PC the overlay reads the Cursor app's own token; a phone has no Cursor
+ * app, so it signs in the way the Cursor app does: open cursor.com/loginDeepControl with a
+ * PKCE challenge, then poll api2.cursor.sh until the browser login completes.
+ */
+object CursorApi {
+    private const val LOGIN_URL = "https://cursor.com/loginDeepControl"
+    private const val POLL_URL  = "https://api2.cursor.sh/auth/poll"
+    private const val TOKEN_URL = "https://api2.cursor.sh/oauth/token"
+    private const val CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"   // the Cursor app's auth client
+    const val USAGE_URL = "https://cursor.com/api/dashboard/get-current-period-usage"
+    const val ME_URL    = "https://cursor.com/api/auth/me"
+
+    fun loginUrl(uuid: String, verifier: String): String {
+        val challenge = Base64.encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()),
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+        return Uri.parse(LOGIN_URL).buildUpon()
+            .appendQueryParameter("challenge", challenge)
+            .appendQueryParameter("uuid", uuid)
+            .appendQueryParameter("mode", "login")
+            .build().toString()
+    }
+
+    /** The login result once the user approved in the browser; null while still waiting (404). */
+    fun poll(uuid: String, verifier: String): JSONObject? {
+        val url = Uri.parse(POLL_URL).buildUpon()
+            .appendQueryParameter("uuid", uuid)
+            .appendQueryParameter("verifier", verifier)
+            .build().toString()
+        val r = Api.request("GET", url)
+        return r.json()?.takeIf { r.status == 200 && it.optString("accessToken").isNotBlank() }
+    }
+
+    /** WorkOS user id from authId ("auth0|user_…") or the JWT's sub claim. */
+    fun userId(token: String, authId: String = ""): String {
+        if (authId.isNotBlank()) return authId.substringAfterLast("|")
+        return try {
+            val seg = token.split(".")[1]
+            val json = JSONObject(String(Base64.decode(seg, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)))
+            json.optString("sub").substringAfterLast("|")
+        } catch (e: Exception) { "" }
+    }
+
+    private fun cookie(userId: String, token: String) =
+        "WorkosCursorSessionToken=" + Uri.encode(userId) + "%3A%3A" + Uri.encode(token)
+
+    private fun headers(userId: String, token: String) = mapOf(
+        "Cookie" to cookie(userId, token),
+        // cursor.com rejects state-changing requests without a matching origin.
+        "Origin" to "https://cursor.com",
+        "Referer" to "https://cursor.com/dashboard?tab=usage",
+    )
+
+    fun usage(userId: String, token: String) =
+        Api.request("POST", USAGE_URL, headers(userId, token), json = JSONObject())
+
+    fun email(userId: String, token: String): String? =
+        Api.request("GET", ME_URL, headers(userId, token))
+            .takeIf { it.status == 200 }?.json()?.optString("email")?.takeIf { it.isNotBlank() }
+
+    /** New access token, or null when the refresh token is no longer accepted. */
+    fun refresh(refreshToken: String): JSONObject? {
+        if (refreshToken.isBlank()) return null
+        val r = Api.request("POST", TOKEN_URL, json = JSONObject()
+            .put("grant_type", "refresh_token")
+            .put("client_id", CLIENT_ID)
+            .put("refresh_token", refreshToken))
+        return r.json()?.takeIf { r.status == 200 && it.optString("access_token").isNotBlank() }
+    }
+}
