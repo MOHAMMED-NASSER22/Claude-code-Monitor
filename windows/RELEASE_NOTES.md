@@ -1,3 +1,22 @@
+## Token Maxxing — Windows desktop overlay v1.12
+
+### What's new in v1.12
+
+- **The Cursor card is back.** Recent Cursor builds stopped keeping the
+  sign-in token in the clear — it is now wrapped by Electron's safeStorage
+  (`cursor-safe-storage:v1:…`). Token Maxxing couldn't read that, so it quietly
+  showed no Cursor card at all. It now unwraps the token with Windows' own
+  DPAPI + AES-256-GCM, so Auto and API percentages are live again. No new
+  dependency and no change in download size; older plaintext tokens still work.
+- **No more silent disappearing act.** If the Cursor token is ever present but
+  unreadable, the card now says why instead of vanishing — which is how the
+  change above went unnoticed for as long as it did.
+- A token Cursor has *just* refreshed is picked up on the next poll instead of
+  the one after (the read now honours Cursor's write-ahead log).
+
+Claude session and weekly reporting are unchanged — both were working
+throughout; only the Cursor source was broken.
+
 ## Token Maxxing — Windows desktop overlay v1.11
 
 ### What's new in v1.11
