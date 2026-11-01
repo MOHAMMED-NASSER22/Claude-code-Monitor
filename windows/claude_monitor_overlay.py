@@ -617,7 +617,7 @@ CLAUDE_CODE_SYSTEM = (
     "You are Claude Code, Anthropic's official CLI for Claude.")
 BETA_HEADER  = "oauth-2025-04-20"
 CRED_DIR     = os.path.expanduser(os.environ.get("CRED_DIR", "~/.claude_usage_bridge"))
-APP_VERSION  = "1.12"            # keep in sync with windows/version_info.txt
+APP_VERSION  = "1.13"            # keep in sync with windows/version_info.txt
 GITHUB_REPO  = "MOHAMMED-NASSER22/Claude-code-Monitor"
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000   # 6h; also runs once shortly after launch
 UPDATE_BANNER_H = 26
@@ -1275,6 +1275,14 @@ def _plan_from_profile(prof: dict) -> str:
     org = prof.get("organization") or {}
     tier = str(org.get("rate_limit_tier") or "").lower()
     otype = str(org.get("organization_type") or "").lower()
+    # Newer plans keep their Max lineage in organization_type/rate_limit_tier
+    # (Ultra still reports claude_max / default_claude_max_20x) and announce
+    # themselves only through plan_display_name. Trust that name when it says
+    # something the tier can't, and fall through to the tier for max/pro so the
+    # well-known MAX20x / MAX5x / PRO badges keep their exact spelling.
+    display = str(org.get("plan_display_name") or "").strip()
+    if display and not re.search(r"max|pro", display, re.I):
+        return re.sub(r"[^A-Za-z0-9]", "", display).upper()[:6] or "CLAUDE"
     if "max" in otype or "max" in tier or acct.get("has_claude_max"):
         m = re.search(r"(\d+)x", tier)
         return f"MAX{m.group(1)}x" if m else "MAX"
@@ -1383,6 +1391,23 @@ def _limit_label(lim: dict) -> str:
     return (name or kind.replace("_", " ")).upper()
 
 
+def _plan_has_session(resp: dict) -> bool:
+    """Whether the plan has a 5h window at all.
+
+    Distinct from "a session isn't running": Max keeps `five_hour` present even
+    at 0% between sessions, while Ultra drops both `five_hour` and the
+    `kind: "session"` entry from `limits` because it has no session cap. Older
+    responses without a `limits` array are assumed to have one, as before.
+    """
+    if (resp.get("five_hour") or {}).get("resets_at") is not None:
+        return True
+    limits = resp.get("limits")
+    if isinstance(limits, list) and limits:
+        return any(isinstance(l, dict) and l.get("kind") == "session"
+                   for l in limits)
+    return True
+
+
 def _extra_limits(resp: dict) -> list[dict]:
     """Model/surface-scoped windows beyond session + weekly (e.g. Max's per-model
     weekly cap) — the same rows claude.ai's usage page shows.
@@ -1478,11 +1503,12 @@ def _fetch_claude_accounts() -> list[dict]:
             fh = resp.get("five_hour") or {}
             sd = resp.get("seven_day")  or {}
             active = fh.get("resets_at") is not None
+            has_session = _plan_has_session(resp)
             cfg = _account_settings(path)
             if active:
                 if cfg["session_started"]:
                     _save_account_settings(path, session_started=False)
-            elif (cfg["auto_start"] and not cfg["session_started"]
+            elif (has_session and cfg["auto_start"] and not cfg["session_started"]
                   and time.time() - _start_failed_at.get(path, 0) > START_RETRY_S):
                 if not _start_session(token):
                     _start_failed_at[path] = time.time()
@@ -1506,6 +1532,7 @@ def _fetch_claude_accounts() -> list[dict]:
                 "extra":       _extra_limits(resp),
                 "plan":        _account_plan(path, headers),
                 "active":      active,
+                "has_session": has_session,
                 "ok":          True,
                 "error":       "",
             })
@@ -1814,6 +1841,8 @@ def _draw_metric_card(g: Gfx, y0, label, badge, pct, reset_min, ok: bool, t: flo
 
 
 EXTRA_ROW_H = 32                           # logical px per model-scoped limit row
+DASH_H          = 128                      # single-account view: session + weekly
+DASH_H_NO_SESSION = DASH_H - 59            # weekly only (Ultra): session slot gone
 
 
 def _plan_badge_x(plan: str) -> int:
@@ -1868,21 +1897,28 @@ def _draw_dashboard(g: Gfx, d: dict, t: float,
                     C_TEXT if blip else spark_col)
     g.draw_fast_hline(0, 12, 160, C_ACCENT if ok else C_RED)
 
-    sess_pct = s["pct"] if s.get("active", True) else -1
-    _draw_metric_card(g, 16, s.get("label", "SESSION"), s.get("badge", "5h"), sess_pct,
-                      s.get("resets_in_min", 0) if sess_pct >= 0 else 0, ok, t, brand,
-                      _pace(sess_pct, s.get("resets_in_min"), s.get("window_min")))
+    # A plan with no 5h window (Ultra) shows weekly alone, in the top slot,
+    # rather than a permanently greyed-out session card.
+    has_sess = d.get("has_session", True)
+    weekly_y, extras_y = (75, 128) if has_sess else (16, DASH_H_NO_SESSION)
+    if has_sess:
+        sess_pct = s["pct"] if s.get("active", True) else -1
+        _draw_metric_card(g, 16, s.get("label", "SESSION"), s.get("badge", "5h"),
+                          sess_pct,
+                          s.get("resets_in_min", 0) if sess_pct >= 0 else 0, ok, t,
+                          brand,
+                          _pace(sess_pct, s.get("resets_in_min"), s.get("window_min")))
+        g.draw_fast_hline(6, 71, 148, C_TRACK)
 
-    g.draw_fast_hline(6, 71, 148, C_TRACK)
-
-    _draw_metric_card(g, 75, w.get("label", "WEEKLY"), w.get("badge", "7d"), w["pct"],
+    _draw_metric_card(g, weekly_y, w.get("label", "WEEKLY"), w.get("badge", "7d"),
+                      w["pct"],
                       w.get("resets_in_min", 0), ok, t, brand,
                       _pace(w["pct"], w.get("resets_in_min"), w.get("window_min")))
 
-    # Model-scoped limits (e.g. Max's FABLE weekly) below the two main cards.
+    # Model-scoped limits (e.g. Max's FABLE weekly) below the main cards.
     extras = d.get("extra") or []
     for i in range(min(extra_rows, len(extras))):
-        y0 = 128 + i * EXTRA_ROW_H + 3
+        y0 = extras_y + i * EXTRA_ROW_H + 3
         g.draw_fast_hline(6, y0 - 4, 148, C_TRACK)
         _draw_extra_row(g, y0, extras[i], ok, brand)
 
@@ -1924,9 +1960,12 @@ def _stack_section(a: dict) -> dict:
     s_pct, s_min = a.get("session_pct", 0), a.get("session_min")
     w_pct, w_min = a.get("weekly_pct", 0), a.get("weekly_min")
     # Per-model rows (FABLE) stay without a pace number.
-    sec["rows"] = [("SESSION", s_pct if active else -1, s_min if active else None,
-                    _pace(s_pct, s_min, SESSION_MIN) if active else None),
-                   ("WEEKLY", w_pct, w_min, _pace(w_pct, w_min, WEEK_MIN))]
+    sec["rows"] = []
+    if a.get("has_session", True):
+        sec["rows"].append(("SESSION", s_pct if active else -1,
+                            s_min if active else None,
+                            _pace(s_pct, s_min, SESSION_MIN) if active else None))
+    sec["rows"].append(("WEEKLY", w_pct, w_min, _pace(w_pct, w_min, WEEK_MIN)))
     sec["rows"] += [(x.get("label", ""), x.get("pct", 0), x.get("min"), None)
                     for x in a.get("extra") or []]
     return sec
@@ -2052,9 +2091,11 @@ def _mini_groups(accounts: list[dict]) -> list[dict]:
                      ("P", w_pct, None)]
         else:
             tag = re.sub(r"[^A-Z]", "", (a.get("plan") or "").upper())[:3]                 or (a.get("label") or "?")[:3].upper()
-            lines = [("S", s_pct if active else -1,
-                      _pace(s_pct, s_min, SESSION_MIN) if active else None),
-                     ("W", w_pct, _pace(w_pct, w_min, WEEK_MIN))]
+            lines = []
+            if a.get("has_session", True):
+                lines.append(("S", s_pct if active else -1,
+                              _pace(s_pct, s_min, SESSION_MIN) if active else None))
+            lines.append(("W", w_pct, _pace(w_pct, w_min, WEEK_MIN)))
         groups.append({"cursor": cursor, "ok": ok, "tag": tag, "lines": lines,
                        "name": a.get("label") or ""})
     return groups
@@ -2128,8 +2169,11 @@ def _draw_mini(p: QPainter, groups: list[dict], t: float, w: int, h: int,
         p.setFont(f)
 
         vx = x + MINI_LOGO + 3
+        # Centre on this group's own line count: a one-line (Ultra) group sits
+        # on the strip's midline instead of hanging where the top row was.
+        gtop = (h - max(1, len(grp["lines"])) * line_h) / 2
         for i, (_lab, pct, pace) in enumerate(grp["lines"]):
-            y = top + i * line_h
+            y = gtop + i * line_h
             if not ok or pct is None or pct < 0:
                 txt, col = "--", dim
                 pace = None
@@ -3609,6 +3653,7 @@ class OverlayWindow(QWidget):
                         else (SESSION_MIN, WEEK_MIN))
         return {
             "ok":      a["ok"],
+            "has_session": a.get("has_session", True),
             "account": acct,
             "plan":    plan,
             "extra":   a.get("extra") or [],
@@ -3652,7 +3697,9 @@ class OverlayWindow(QWidget):
             if notice:
                 dash["account"] = notice[:23]
                 dash["ok"] = True
-            height = 128 + EXTRA_ROW_H * len(dash["extra"])
+            height = ((DASH_H if dash.get("has_session", True)
+                       else DASH_H_NO_SESSION)
+                      + EXTRA_ROW_H * len(dash["extra"]))
         if self._canvas.set_logical_height(height):
             self._apply_full_size()
         self._canvas.set_dashboard(dash)

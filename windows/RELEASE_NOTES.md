@@ -1,3 +1,23 @@
+## Token Maxxing — Windows desktop overlay v1.13
+
+### What's new in v1.13
+
+- **Ultra plans are understood.** Ultra has no 5-hour session cap at all, so
+  the usage API stops sending a session window for it. Token Maxxing used to
+  read that as "a session that isn't running" and left a permanently greyed-out
+  SESSION card sitting there. An Ultra account now simply shows WEEKLY (plus any
+  per-model rows) — in the full window, the stacked view and the taskbar strip.
+- **The plan badge says ULTRA.** Ultra keeps its Max lineage in the API
+  (`organization_type: claude_max`, `rate_limit_tier: default_claude_max_20x`),
+  so it used to badge as MAX20x. The badge now follows the plan name the server
+  reports. MAX20x / MAX5x / PRO are unchanged.
+- **No more pointless session starts.** With auto-start enabled, the overlay
+  would try to kick off a session on a plan that can't have one. It now skips
+  that entirely when the plan has no session window.
+
+An idle session on Max still shows its card as before — "idle" and "this plan
+has no session" are now told apart properly, from the limits the server sends.
+
 ## Token Maxxing — Windows desktop overlay v1.12
 
 ### What's new in v1.12
