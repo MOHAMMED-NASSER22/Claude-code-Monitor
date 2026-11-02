@@ -1,3 +1,20 @@
+## Token Maxxing for Android v1.2
+
+### What's new in v1.2
+
+- **Ultra plans are understood.** Ultra has no 5-hour session cap, so the
+  usage API stops sending a session window for it. The app used to read that
+  as "a session that isn't running" and showed an idle SESSION row that could
+  never fill — including a home-screen widget that permanently read
+  "SESSION idle". An Ultra account now just shows WEEKLY (plus any per-model
+  rows), in the account list, the detail page and every widget size.
+- **The plan badge says ULTRA.** Ultra keeps its Max lineage in the API, so it
+  used to badge as MAX20x. The badge now follows the plan name the server
+  reports. MAX20x / MAX5x / PRO are unchanged.
+
+An idle session on Max still shows its row as before — "idle" and "this plan
+has no session" are now told apart from the limits the server sends.
+
 ## Token Maxxing for Android v1.1
 
 ### What's new in v1.1

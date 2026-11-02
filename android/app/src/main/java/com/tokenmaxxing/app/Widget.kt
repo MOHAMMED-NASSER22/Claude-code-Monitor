@@ -217,14 +217,27 @@ private fun Square(u: Usage, w: Dp, now: Long) {
         Spacer(GlanceModifier.height(4.dp))
         Text("resets ${fmtShort(minutesLeft(u.main.resetsAt, now))}", style = mono(Colors.SOFT, 11))
         Spacer(GlanceModifier.height(10.dp))
-        val other = if (u.isCursor) u.weekly else u.session
-        val otherPct = if (u.isCursor) u.weekly.pct else u.sessionShown
+        // Second line: the limit that isn't the headline. On a plan with no 5h
+        // window there is none, so fall back to the first model-scoped row
+        // rather than claiming a session is "idle" forever.
+        val other = when {
+            u.isCursor -> u.weekly
+            u.showsSession -> u.session
+            else -> u.extra.firstOrNull()
+        }
+        val otherPct = when {
+            u.isCursor -> u.weekly.pct
+            u.showsSession -> u.sessionShown
+            else -> other?.pct ?: -1
+        }
         val line = when {
             !u.ok -> u.error
+            other == null -> ""
             otherPct < 0 -> "${other.label} idle"
             else -> "${other.label} $otherPct% · ${fmtShort(minutesLeft(other.resetsAt, now))}"
         }
-        Text(line, style = mono(if (u.ok) Colors.SOFT else Colors.RED, 11), maxLines = 1)
+        if (line.isNotBlank())
+            Text(line, style = mono(if (u.ok) Colors.SOFT else Colors.RED, 11), maxLines = 1)
     }
 }
 
@@ -236,7 +249,8 @@ private fun Strip(list: List<Usage>, now: Long) {
         list.take(4).forEach { u ->
             Column(GlanceModifier.defaultWeight()) {
                 Text(u.label, style = mono(nameCol(u), 11), maxLines = 1)
-                StripLine(if (u.isCursor) "auto" else "5h", u.sessionShown, u.sessionPace(now), u.ok)
+                if (u.showsSession)
+                    StripLine(if (u.isCursor) "auto" else "5h", u.sessionShown, u.sessionPace(now), u.ok)
                 StripLine(if (u.isCursor) "api" else "7d", u.weekly.pct, u.weeklyPace(now), u.ok)
             }
         }
@@ -284,12 +298,17 @@ private fun Large(list: List<Usage>, w: Dp, h: Dp, now: Long) {
                     if (u.plan.isNotBlank()) Text(u.plan, style = mono(Colors.DIM, 10))
                 }
                 if (!u.ok) Text(u.error, style = mono(Colors.RED, 10), maxLines = 1)
-                LimitRow(u.session.label, 56.dp, u.sessionShown, u.sessionPace(now), u.session.resetsAt, u.ok, barEst, now)
+                if (u.showsSession)
+                    LimitRow(u.session.label, 56.dp, u.sessionShown, u.sessionPace(now), u.session.resetsAt, u.ok, barEst, now)
                 LimitRow(u.weekly.label, 56.dp, u.weekly.pct, u.weeklyPace(now), u.weekly.resetsAt, u.ok, barEst, now)
             } else if (pair) Column(GlanceModifier.fillMaxWidth().padding(top = 2.dp)) {
-                LimitRow(u.label, labelW, u.sessionShown, u.sessionPace(now), u.session.resetsAt, u.ok, barEst, now,
-                         labelCol = nameCol(u), tag = if (u.isCursor) "auto" else "5h")
-                LimitRow("", labelW, u.weekly.pct, u.weeklyPace(now), u.weekly.resetsAt, u.ok, barEst, now,
+                if (u.showsSession)
+                    LimitRow(u.label, labelW, u.sessionShown, u.sessionPace(now), u.session.resetsAt, u.ok, barEst, now,
+                             labelCol = nameCol(u), tag = if (u.isCursor) "auto" else "5h")
+                // Without a session row the weekly row carries the account name.
+                LimitRow(if (u.showsSession) "" else u.label, labelW, u.weekly.pct,
+                         u.weeklyPace(now), u.weekly.resetsAt, u.ok, barEst, now,
+                         labelCol = if (u.showsSession) Colors.SOFT else nameCol(u),
                          tag = if (u.isCursor) "api" else "7d")
             } else Column(GlanceModifier.fillMaxWidth()) {
                 LimitRow(u.label, 70.dp, u.main.pct, u.mainPace(now), u.main.resetsAt, u.ok, barEst, now,

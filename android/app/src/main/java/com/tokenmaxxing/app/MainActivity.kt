@@ -229,7 +229,8 @@ private fun ColumnScope.ListScreen(
                     if (u.plan.isNotBlank()) Badge(u.plan)
                 }
                 if (!u.ok) MonoText(u.error, Colors.RED, 12.sp)
-                ListRow(u.session.label, u.sessionShown, u.session.resetsAt, u.sessionPace(now), u.ok, now)
+                if (u.showsSession)
+                    ListRow(u.session.label, u.sessionShown, u.session.resetsAt, u.sessionPace(now), u.ok, now)
                 ListRow(u.weekly.label, u.weekly.pct, u.weekly.resetsAt, u.weeklyPace(now), u.ok, now)
                 u.extra.forEach { ListRow(it.label, it.pct, it.resetsAt, null, u.ok, now) }
             }
@@ -310,11 +311,13 @@ private fun ColumnScope.DetailScreen(u: Usage, busy: Boolean, now: Long, onBack:
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
            verticalArrangement = Arrangement.spacedBy(22.dp)) {
         if (!u.ok) MonoText(u.error, Colors.RED, 13.sp)
-        val sp = u.sessionPace(now)
-        val sWindow = if (u.isCursor) (if (u.cycleMin > 0) u.cycleMin else Pace.MONTH_MIN) else Pace.SESSION_MIN
-        BigCard(u.session.label, u.sessionBadge, u.sessionShown, u.session.resetsAt, sp,
-                paceSentence(u.session.pct, u.session.resetsAt, sWindow, sp, now), u.ok, now, brand(u))
-        Box(Modifier.fillMaxWidth().height(1.dp).background(c(Colors.LINE)))
+        if (u.showsSession) {
+            val sp = u.sessionPace(now)
+            val sWindow = if (u.isCursor) (if (u.cycleMin > 0) u.cycleMin else Pace.MONTH_MIN) else Pace.SESSION_MIN
+            BigCard(u.session.label, u.sessionBadge, u.sessionShown, u.session.resetsAt, sp,
+                    paceSentence(u.session.pct, u.session.resetsAt, sWindow, sp, now), u.ok, now, brand(u))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(c(Colors.LINE)))
+        }
         val wp = u.weeklyPace(now)
         BigCard(u.weekly.label, u.weeklyBadge, u.weekly.pct, u.weekly.resetsAt, wp,
                 paceSentence(u.weekly.pct, u.weekly.resetsAt, Pace.WEEK_MIN, wp, now), u.ok, now, brand(u))

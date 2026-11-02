@@ -101,6 +101,7 @@ object Repo {
             Usage(
                 id = c.id, label = c.label, plan = c.plan, ok = true,
                 active = sReset != null,
+                hasSession = planHasSession(j),
                 session = Limit("SESSION", pct(fh?.opt("utilization")), sReset),
                 weekly = Limit("WEEKLY", pct(sd?.opt("utilization")), parseTime(sd?.opt("resets_at"))),
                 extra = extraLimits(j),
@@ -280,6 +281,23 @@ object Repo {
     }
 
     /** Model-scoped windows beyond session + weekly (e.g. Max's FABLE weekly). */
+    /**
+     * Whether this plan has a 5h window at all.
+     *
+     * Not the same as "no session is running": Max keeps `five_hour` present
+     * even at 0% between sessions, while Ultra has no session cap, so the API
+     * drops `five_hour` and omits the kind:"session" entry from `limits`.
+     * Responses with no `limits` array are assumed to have one, as before.
+     */
+    private fun planHasSession(j: JSONObject): Boolean {
+        if (parseTime(j.optJSONObject("five_hour")?.opt("resets_at")) != null) return true
+        val limits = j.optJSONArray("limits") ?: return true
+        if (limits.length() == 0) return true
+        return (0 until limits.length()).any {
+            limits.optJSONObject(it)?.optString("kind") == "session"
+        }
+    }
+
     private fun extraLimits(j: JSONObject): List<Limit> {
         val limits = j.optJSONArray("limits")
         if (limits != null) {
@@ -299,6 +317,17 @@ object Repo {
         val org = prof.optJSONObject("organization") ?: JSONObject()
         val tier = org.optString("rate_limit_tier").lowercase()
         val otype = org.optString("organization_type").lowercase()
+        // Newer plans keep their Max lineage in organization_type and
+        // rate_limit_tier (Ultra reports claude_max / default_claude_max_20x)
+        // and name themselves only in plan_display_name. Trust that name when
+        // it says something the tier can't, and fall through for max/pro so
+        // MAX20x / MAX5x / PRO keep their exact spelling.
+        val display = org.optString("plan_display_name").trim()
+        if (display.isNotBlank() && !display.contains("max", true) &&
+            !display.contains("pro", true)) {
+            val badge = display.replace(Regex("[^A-Za-z0-9]"), "").uppercase().take(6)
+            if (badge.isNotBlank()) return badge
+        }
         return when {
             "max" in otype || "max" in tier || acct.optBoolean("has_claude_max") ->
                 Regex("(\\d+)x").find(tier)?.let { "MAX${it.groupValues[1]}x" } ?: "MAX"

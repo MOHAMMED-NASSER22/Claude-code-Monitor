@@ -67,6 +67,7 @@ data class Usage(
     val ok: Boolean,
     val error: String = "",
     val active: Boolean = false,    // a 5h session is running
+    val hasSession: Boolean = true, // false on plans with no 5h cap at all (Ultra)
     val session: Limit = Limit("SESSION", 0, null),
     val weekly: Limit = Limit("WEEKLY", 0, null),
     val extra: List<Limit> = emptyList(),
@@ -89,6 +90,13 @@ data class Usage(
     /** Session % to show, -1 when idle (Claude with no running 5h session). */
     val sessionShown get() = if (isCursor || active) session.pct else -1
 
+    /**
+     * Whether to draw a session row at all. Cursor always has one (its AUTO
+     * pool); Claude plans without a 5h cap (Ultra) have none to draw, which is
+     * different from a session that simply isn't running right now.
+     */
+    val showsSession get() = isCursor || hasSession
+
     /** The headline number for one-account widgets: Claude WEEKLY, Cursor AUTO. */
     val main get() = if (isCursor) session else weekly
     fun mainPace(now: Long = System.currentTimeMillis()) = if (isCursor) sessionPace(now) else weeklyPace(now)
@@ -98,7 +106,7 @@ data class Usage(
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("kind", kind).put("label", label).put("plan", plan).put("ok", ok)
-        .put("error", error).put("active", active)
+        .put("error", error).put("active", active).put("hasSession", hasSession)
         .put("session", session.toJson()).put("weekly", weekly.toJson())
         .put("extra", JSONArray().apply { extra.forEach { put(it.toJson()) } })
         .put("fetchedAt", fetchedAt).put("cycleMin", cycleMin)
@@ -112,6 +120,8 @@ data class Usage(
             ok = j.optBoolean("ok"),
             error = j.optString("error"),
             active = j.optBoolean("active"),
+            // Default true so usage cached by an older build still renders.
+            hasSession = j.optBoolean("hasSession", true),
             session = j.optJSONObject("session")?.let(Limit::from) ?: Limit("SESSION", 0, null),
             weekly = j.optJSONObject("weekly")?.let(Limit::from) ?: Limit("WEEKLY", 0, null),
             extra = j.optJSONArray("extra")?.let { a ->
